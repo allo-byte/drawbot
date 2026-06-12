@@ -1,7 +1,8 @@
 import { WebSocketServer, WebSocket } from "ws";
 import { createServer } from "http";
 import { readFileSync, existsSync } from "fs";
-import { join, extname } from "path";
+import { join, extname, dirname } from "path";
+import { fileURLToPath } from "url";
 
 type Point = { x: number; y: number };
 type Stroke = {
@@ -13,7 +14,13 @@ type Stroke = {
 };
 
 const port = Number(process.env.PORT) || 3001;
-const distPath = join(import.meta.dir, "../dist");
+
+// Funciona tanto con Bun como con Node, tanto en local como en Railway
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const distPath = join(__dirname, "../dist");
+
+console.log(`📁 Serving dist from: ${distPath}`);
+console.log(`🚀 DrawBot running on :${port}`);
 
 const mimeTypes: Record<string, string> = {
   ".html": "text/html",
@@ -27,11 +34,10 @@ const mimeTypes: Record<string, string> = {
   ".woff2":"font/woff2",
 };
 
-// HTTP server — sirve el frontend buildeado
 const httpServer = createServer((req, res) => {
-  let filePath = join(distPath, req.url === "/" ? "index.html" : req.url!);
+  let urlPath = req.url?.split("?")[0] || "/";
+  let filePath = join(distPath, urlPath === "/" ? "index.html" : urlPath);
 
-  // Si no existe el archivo exacto, servir index.html (SPA fallback)
   if (!existsSync(filePath)) {
     filePath = join(distPath, "index.html");
   }
@@ -47,14 +53,11 @@ const httpServer = createServer((req, res) => {
   }
 });
 
-// WebSocket server — sobre el mismo servidor HTTP
 const wss = new WebSocketServer({ server: httpServer });
 
 const rooms    = new Map<string, Set<WebSocket>>();
 const roomStrokes = new Map<string, Stroke[]>();
 const roomUsers   = new Map<string, Map<string, string>>();
-
-console.log(`🚀 DrawBot running on :${port}`);
 
 wss.on("connection", (ws: WebSocket) => {
   let roomId  = "default";
