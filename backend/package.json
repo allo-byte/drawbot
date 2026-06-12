@@ -1,8 +1,11 @@
 {
   "name": "backend",
-  "module": "index.ts",
   "type": "module",
   "private": true,
+  "scripts": {
+    "start": "bun run server.ts",
+    "dev": "bun --watch server.ts"
+  },
   "devDependencies": {
     "@types/bun": "latest",
     "@types/ws": "^8.18.1"

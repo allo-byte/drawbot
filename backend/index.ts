@@ -1,13 +1,9 @@
-import {
-  WebSocketServer,
-  WebSocket,
-} from "ws";
+import { WebSocketServer, WebSocket } from "ws";
+import { createServer } from "http";
+import { readFileSync, existsSync } from "fs";
+import { join, extname } from "path";
 
-type Point = {
-  x: number;
-  y: number;
-};
-
+type Point = { x: number; y: number };
 type Stroke = {
   points: Point[];
   color: string;
@@ -16,235 +12,121 @@ type Stroke = {
   eraser: boolean;
 };
 
-const wss = new WebSocketServer({
-  port: 3001,
+const port = Number(process.env.PORT) || 3001;
+const distPath = join(import.meta.dir, "../dist");
+
+const mimeTypes: Record<string, string> = {
+  ".html": "text/html",
+  ".js":   "application/javascript",
+  ".css":  "text/css",
+  ".png":  "image/png",
+  ".svg":  "image/svg+xml",
+  ".ico":  "image/x-icon",
+  ".json": "application/json",
+  ".woff": "font/woff",
+  ".woff2":"font/woff2",
+};
+
+// HTTP server — sirve el frontend buildeado
+const httpServer = createServer((req, res) => {
+  let filePath = join(distPath, req.url === "/" ? "index.html" : req.url!);
+
+  // Si no existe el archivo exacto, servir index.html (SPA fallback)
+  if (!existsSync(filePath)) {
+    filePath = join(distPath, "index.html");
+  }
+
+  try {
+    const content = readFileSync(filePath);
+    const ext = extname(filePath);
+    res.writeHead(200, { "Content-Type": mimeTypes[ext] || "application/octet-stream" });
+    res.end(content);
+  } catch {
+    res.writeHead(404);
+    res.end("Not found");
+  }
 });
 
-const rooms = new Map<
-  string,
-  Set<WebSocket>
->();
+// WebSocket server — sobre el mismo servidor HTTP
+const wss = new WebSocketServer({ server: httpServer });
 
-const roomStrokes = new Map<
-  string,
-  Stroke[]
->();
+const rooms    = new Map<string, Set<WebSocket>>();
+const roomStrokes = new Map<string, Stroke[]>();
+const roomUsers   = new Map<string, Map<string, string>>();
 
-// ✅ FIXED: Map<roomId, Map<userId, username>>
-// Antes era Set<{userId, username}> — el .delete() en un Set de objetos
-// nunca funciona porque compara referencias, no valores.
-const roomUsers = new Map<
-  string,
-  Map<string, string>
->();
+console.log(`🚀 DrawBot running on :${port}`);
 
-console.log(
-  "🚀 DrawBot Server running on :3001"
-);
+wss.on("connection", (ws: WebSocket) => {
+  let roomId  = "default";
+  let username = "Invitado";
+  const userId = Math.random().toString(36).substring(2, 9);
 
-wss.on(
-  "connection",
-  (ws: WebSocket) => {
-    let roomId = "default";
-    let username = "Invitado";
+  ws.on("message", (message: Buffer) => {
+    const data = JSON.parse(message.toString());
 
-    const userId = Math.random()
-      .toString(36)
-      .substring(2, 9);
+    if (data.type === "join") {
+      username = data.username || "Invitado";
+      roomId   = data.room;
 
-    ws.on(
-      "message",
-      (message: Buffer) => {
-        const data = JSON.parse(
-          message.toString()
-        );
+      if (!rooms.has(roomId))       rooms.set(roomId, new Set());
+      if (!roomStrokes.has(roomId)) roomStrokes.set(roomId, []);
+      if (!roomUsers.has(roomId))   roomUsers.set(roomId, new Map());
 
-        if (data.type === "join") {
-          username =
-            data.username ||
-            "Invitado";
+      rooms.get(roomId)!.add(ws);
+      roomUsers.get(roomId)!.set(userId, username);
 
-          roomId = data.room;
+      ws.send(JSON.stringify({ type: "init", strokes: roomStrokes.get(roomId) || [] }));
+      ws.send(JSON.stringify({ type: "user", userId: username }));
 
-          if (!rooms.has(roomId)) {
-            rooms.set(
-              roomId,
-              new Set()
-            );
-          }
+      const users = Array.from(roomUsers.get(roomId)!.values());
+      rooms.get(roomId)!.forEach((c) => {
+        if (c.readyState === WebSocket.OPEN)
+          c.send(JSON.stringify({ type: "users", users }));
+      });
 
-          if (!roomStrokes.has(roomId)) {
-            roomStrokes.set(
-              roomId,
-              []
-            );
-          }
+      console.log(`👤 ${username} joined ${roomId} (${roomUsers.get(roomId)!.size})`);
+      return;
+    }
 
-          if (!roomUsers.has(roomId)) {
-            // ✅ FIXED: Map en vez de Set
-            roomUsers.set(
-              roomId,
-              new Map()
-            );
-          }
+    if (data.type === "stroke") {
+      roomStrokes.get(roomId)?.push(data.stroke);
+    }
 
-          rooms
-            .get(roomId)
-            ?.add(ws);
+    if (data.type === "clear") {
+      roomStrokes.set(roomId, []);
+      rooms.get(roomId)?.forEach((c) => {
+        if (c.readyState === WebSocket.OPEN)
+          c.send(JSON.stringify({ type: "clear" }));
+      });
+      return;
+    }
 
-          // ✅ FIXED: set(userId, username) — borrado O(1) y confiable
-          roomUsers
-            .get(roomId)
-            ?.set(userId, username);
+    if (data.type === "cursor") {
+      rooms.get(roomId)?.forEach((c) => {
+        if (c !== ws && c.readyState === WebSocket.OPEN)
+          c.send(JSON.stringify({ type: "cursor", x: data.x, y: data.y, userId, username }));
+      });
+      return;
+    }
 
-          ws.send(
-            JSON.stringify({
-              type: "init",
-              strokes:
-                roomStrokes.get(
-                  roomId
-                ) || [],
-            })
-          );
-
-          ws.send(
-            JSON.stringify({
-              type: "user",
-              userId: username,
-            })
-          );
-
-          // ✅ FIXED: Array.from del Map
-          const users = Array.from(
-            roomUsers.get(roomId)?.values() || []
-          );
-
-          rooms
-            .get(roomId)
-            ?.forEach((client) => {
-              if (
-                client.readyState ===
-                WebSocket.OPEN
-              ) {
-                client.send(
-                  JSON.stringify({
-                    type: "users",
-                    users,
-                  })
-                );
-              }
-            });
-
-          console.log(
-            `👤 ${username} joined room ${roomId} (total: ${roomUsers.get(roomId)?.size})`
-          );
-
-          return;
-        }
-
-        if (data.type === "stroke") {
-          roomStrokes
-            .get(roomId)
-            ?.push(data.stroke);
-        }
-
-        if (data.type === "clear") {
-          // Borra trazos del servidor
-          roomStrokes.set(roomId, []);
-
-          // Broadcast a todos en la sala (incluido quien limpió)
-          rooms.get(roomId)?.forEach((client) => {
-            if (client.readyState === WebSocket.OPEN) {
-              client.send(
-                JSON.stringify({ type: "clear" })
-              );
-            }
-          });
-
-          return;
-        }
-
-        if (data.type === "cursor") {
-          const room =
-            rooms.get(roomId);
-
-          if (!room) return;
-
-          room.forEach(
-            (client) => {
-              if (
-                client !== ws &&
-                client.readyState ===
-                  WebSocket.OPEN
-              ) {
-                client.send(
-                  JSON.stringify({
-                    type: "cursor",
-                    x: data.x,
-                    y: data.y,
-                    userId,
-                    username,
-                  })
-                );
-              }
-            }
-          );
-
-          return;
-        }
-
-        const room =
-          rooms.get(roomId);
-
-        if (!room) return;
-
-        room.forEach((client) => {
-          if (
-            client !== ws &&
-            client.readyState ===
-              WebSocket.OPEN
-          ) {
-            client.send(
-              JSON.stringify(data)
-            );
-          }
-        });
-      }
-    );
-
-    ws.on("close", () => {
-      rooms
-        .get(roomId)
-        ?.delete(ws);
-
-      // ✅ FIXED: delete por key (userId) — funciona siempre
-      roomUsers
-        .get(roomId)
-        ?.delete(userId);
-
-      const users = Array.from(
-        roomUsers.get(roomId)?.values() || []
-      );
-
-      rooms
-        .get(roomId)
-        ?.forEach((client) => {
-          if (
-            client.readyState ===
-            WebSocket.OPEN
-          ) {
-            client.send(
-              JSON.stringify({
-                type: "users",
-                users,
-              })
-            );
-          }
-        });
-
-      console.log(
-        `👋 ${username} left room ${roomId} (total: ${roomUsers.get(roomId)?.size})`
-      );
+    rooms.get(roomId)?.forEach((c) => {
+      if (c !== ws && c.readyState === WebSocket.OPEN)
+        c.send(JSON.stringify(data));
     });
-  }
-);
+  });
+
+  ws.on("close", () => {
+    rooms.get(roomId)?.delete(ws);
+    roomUsers.get(roomId)?.delete(userId);
+
+    const users = Array.from(roomUsers.get(roomId)?.values() || []);
+    rooms.get(roomId)?.forEach((c) => {
+      if (c.readyState === WebSocket.OPEN)
+        c.send(JSON.stringify({ type: "users", users }));
+    });
+
+    console.log(`👋 ${username} left ${roomId} (${roomUsers.get(roomId)?.size})`);
+  });
+});
+
+httpServer.listen(port);
