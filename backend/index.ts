@@ -1,8 +1,7 @@
 import { WebSocketServer, WebSocket } from "ws";
 import { createServer } from "http";
 import { readFileSync, existsSync } from "fs";
-import { join, extname, dirname } from "path";
-import { fileURLToPath } from "url";
+import { join, extname } from "path";
 
 type Point = { x: number; y: number };
 type Stroke = {
@@ -15,9 +14,9 @@ type Stroke = {
 
 const port = Number(process.env.PORT) || 3001;
 
-// Funciona tanto con Bun como con Node, tanto en local como en Railway
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const distPath = join(__dirname, "../dist");
+// process.cwd() en Railway devuelve /app/backend (el root directory)
+// ../dist sube un nivel a /app/dist donde está el frontend buildeado
+const distPath = join(process.cwd(), "../dist");
 
 console.log(`📁 Serving dist from: ${distPath}`);
 console.log(`🚀 DrawBot running on :${port}`);
@@ -55,12 +54,12 @@ const httpServer = createServer((req, res) => {
 
 const wss = new WebSocketServer({ server: httpServer });
 
-const rooms    = new Map<string, Set<WebSocket>>();
+const rooms       = new Map<string, Set<WebSocket>>();
 const roomStrokes = new Map<string, Stroke[]>();
 const roomUsers   = new Map<string, Map<string, string>>();
 
 wss.on("connection", (ws: WebSocket) => {
-  let roomId  = "default";
+  let roomId   = "default";
   let username = "Invitado";
   const userId = Math.random().toString(36).substring(2, 9);
 
