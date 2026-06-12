@@ -1,15 +1,18 @@
 import { useState } from "react";
 import Canvas from "./components/Canvas";
+import type { BrushType } from "./components/Canvas";
 import Toolbar from "./components/Toolbar";
 
 function App() {
-  const [color, setColor] = useState("#ffffff");
+  const [color,     setColor    ] = useState("#ffffff");
   const [brushSize, setBrushSize] = useState(5);
-  const [opacity, setOpacity] = useState(1);
-  const [eraser, setEraser] = useState(false);
-  const [savePNG, setSavePNG] = useState<() => void>(() => () => {});
-  const [users, setUsers] = useState<string[]>([]);
-  const [username, setUsername] = useState(
+  const [opacity,   setOpacity  ] = useState(1);
+  const [eraser,    setEraser   ] = useState(false);
+  const [brushType, setBrushType] = useState<BrushType>("pen");
+  const [bgColor,   setBgColor  ] = useState("#111111");
+  const [savePNG,   setSavePNG  ] = useState<() => void>(() => () => {});
+  const [users,     setUsers    ] = useState<string[]>([]);
+  const [username,  setUsername ] = useState(
     localStorage.getItem("drawbot-name") || "Invitado"
   );
 
@@ -37,6 +40,13 @@ function App() {
         setOpacity={setOpacity}
         eraser={eraser}
         setEraser={setEraser}
+        brushType={brushType}
+        setBrushType={setBrushType}
+        bgColor={bgColor}
+        setBgColor={(c: string) => {
+          setBgColor(c);
+          (Canvas as any)._sendBgColor(c);
+        }}
         savePNG={savePNG}
         users={users}
         username={username}
@@ -52,8 +62,11 @@ function App() {
         brushSize={brushSize}
         opacity={opacity}
         eraser={eraser}
+        brushType={brushType}
+        bgColor={bgColor}
         setUsers={setUsers}
         onReady={(saveFn) => setSavePNG(() => saveFn)}
+        onBgColor={(c) => setBgColor(c)}
       />
     </>
   );
