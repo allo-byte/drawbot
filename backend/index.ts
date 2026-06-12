@@ -51,9 +51,10 @@ const httpServer = createServer((req, res) => {
 
 const wss = new WebSocketServer({ server: httpServer });
 
-const rooms       = new Map<string, Set<WebSocket>>();
-const roomStrokes = new Map<string, Stroke[]>();
-const roomUsers   = new Map<string, Map<string, string>>();
+const rooms        = new Map<string, Set<WebSocket>>();
+const roomStrokes  = new Map<string, Stroke[]>();
+const roomUsers    = new Map<string, Map<string, string>>();
+const roomBgColor  = new Map<string, string>(); // ← nuevo: color de fondo por sala
 
 wss.on("connection", (ws: WebSocket) => {
   let roomId   = "default";
@@ -74,7 +75,12 @@ wss.on("connection", (ws: WebSocket) => {
       rooms.get(roomId)!.add(ws);
       roomUsers.get(roomId)!.set(userId, username);
 
-      ws.send(JSON.stringify({ type: "init", strokes: roomStrokes.get(roomId) || [] }));
+      // Enviar estado inicial incluyendo bgColor si existe
+      ws.send(JSON.stringify({
+        type:    "init",
+        strokes: roomStrokes.get(roomId) || [],
+        bgColor: roomBgColor.get(roomId) || null,
+      }));
       ws.send(JSON.stringify({ type: "user", userId: username }));
 
       const users = Array.from(roomUsers.get(roomId)!.values());
@@ -99,6 +105,18 @@ wss.on("connection", (ws: WebSocket) => {
       });
       return;
     }
+
+    // ── Nuevo: cambio de color de fondo ─────────────────────────────────────
+    if (data.type === "bgcolor") {
+      roomBgColor.set(roomId, data.color);
+      // Propagar a todos los demás usuarios de la sala
+      rooms.get(roomId)?.forEach((c) => {
+        if (c !== ws && c.readyState === WebSocket.OPEN)
+          c.send(JSON.stringify({ type: "bgcolor", color: data.color }));
+      });
+      return;
+    }
+    // ────────────────────────────────────────────────────────────────────────
 
     if (data.type === "cursor") {
       rooms.get(roomId)?.forEach((c) => {
