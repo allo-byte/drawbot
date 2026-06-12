@@ -13,10 +13,7 @@ type Stroke = {
 };
 
 const port = Number(process.env.PORT) || 3001;
-
-// process.cwd() en Railway devuelve /app/backend (el root directory)
-// ../dist sube un nivel a /app/dist donde está el frontend buildeado
-const distPath = join(process.cwd(), "../dist");
+const distPath = join(process.cwd(), "dist");
 
 console.log(`📁 Serving dist from: ${distPath}`);
 console.log(`🚀 DrawBot running on :${port}`);
