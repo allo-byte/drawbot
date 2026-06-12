@@ -46,26 +46,27 @@ function hexRgb(hex: string) {
 }
 
 function prng(seed: number) {
-  let s = seed ^ 0xdeadbeef;
-  s = Math.imul(s ^ (s >>> 16), 0x45d9f3b);
-  s = Math.imul(s ^ (s >>> 16), 0x45d9f3b);
-  return ((s ^ (s >>> 16)) >>> 0) / 0xffffffff;
+  let s = (seed ^ 0xdeadbeef) >>> 0;
+  s = Math.imul(s ^ (s >>> 16), 0x45d9f3b) >>> 0;
+  s = Math.imul(s ^ (s >>> 16), 0x45d9f3b) >>> 0;
+  return (s >>> 0) / 0xffffffff;
 }
 
 export default function Canvas({
   color, brushSize, opacity, eraser, brushType, username,
   bgColor, setUsers, onReady, onBgColor,
 }: Props) {
-  const canvasRef    = useRef<HTMLCanvasElement>(null);
-  // Canvas offscreen: acumula todos los strokes terminados
-  const offscreenRef = useRef<HTMLCanvasElement | null>(null);
-
+  const canvasRef        = useRef<HTMLCanvasElement>(null);
+  const offscreenRef     = useRef<HTMLCanvasElement | null>(null);
   const wsRef            = useRef<WebSocket | null>(null);
   const cursorsRef       = useRef<Map<string, Cursor>>(new Map());
   const strokesRef       = useRef<Stroke[]>([]);
   const currentStrokeRef = useRef<Stroke | null>(null);
-  // Cuántos strokes del offscreen ya están pintados
   const offscreenCountRef = useRef(0);
+
+  // RAF: pendiente de dibujar
+  const rafRef           = useRef<number | null>(null);
+  const dirtyRef         = useRef(false);
 
   const colorRef     = useRef(color);
   const sizeRef      = useRef(brushSize);
@@ -74,7 +75,7 @@ export default function Canvas({
   const brushTypeRef = useRef(brushType);
   const bgColorRef   = useRef(bgColor);
   const viewRef      = useRef({ x: 0, y: 0, scale: 1 });
-  const touchPointersRef = useRef<Map<number, { x: number; y: number }>>(new Map());
+  const touchPointersRef = useRef<Map<number, {x:number;y:number}>>(new Map());
 
   colorRef.current     = color;
   sizeRef.current      = brushSize;
@@ -92,9 +93,15 @@ export default function Canvas({
   };
 
   // ─── Motor de pinceles ────────────────────────────────────────────────────
-  const drawStroke = (ctx: CanvasRenderingContext2D, stroke: Stroke) => {
-    if (stroke.points.length < 1) return;
-    const bt  = stroke.brushType ?? "pen";
+  // Dibuja SOLO los puntos desde `fromIndex` en adelante (incremental)
+  const drawStrokeFrom = (
+    ctx: CanvasRenderingContext2D,
+    stroke: Stroke,
+    fromIndex: number
+  ) => {
+    const pts = stroke.points;
+    if (pts.length < 1) return;
+    const bt = stroke.brushType ?? "pen";
     const col = stroke.color;
     const sz  = stroke.size;
     const { r, g, b } = hexRgb(col);
@@ -108,24 +115,27 @@ export default function Canvas({
       ctx.globalCompositeOperation = "source-over";
     }
 
+    // Para pinceles de línea: necesitamos un punto anterior para conectar
+    const start = Math.max(fromIndex === 0 ? 0 : fromIndex - 1, 0);
+
     if (bt === "pen") {
-      if (stroke.points.length < 2) { ctx.restore(); return; }
+      if (pts.length < 2) { ctx.restore(); return; }
       ctx.globalAlpha = stroke.opacity;
       ctx.lineCap = "round"; ctx.lineJoin = "round";
       ctx.lineWidth = sz;
       ctx.strokeStyle = erasing ? "#000" : col;
       ctx.beginPath();
-      ctx.moveTo(stroke.points[0].x, stroke.points[0].y);
-      for (let i = 1; i < stroke.points.length; i++)
-        ctx.lineTo(stroke.points[i].x, stroke.points[i].y);
+      ctx.moveTo(pts[start].x, pts[start].y);
+      for (let i = start + 1; i < pts.length; i++)
+        ctx.lineTo(pts[i].x, pts[i].y);
       ctx.stroke();
 
     } else if (bt === "caligraphy1") {
-      if (stroke.points.length < 2) { ctx.restore(); return; }
+      if (pts.length < 2) { ctx.restore(); return; }
       ctx.globalAlpha = stroke.opacity;
       const w = sz, h = Math.max(1, sz * 0.18);
-      for (let i = 1; i < stroke.points.length; i++) {
-        const a = stroke.points[i-1], bPt = stroke.points[i];
+      for (let i = Math.max(start, 1); i < pts.length; i++) {
+        const a = pts[i-1], bPt = pts[i];
         ctx.save();
         ctx.translate((a.x+bPt.x)/2, (a.y+bPt.y)/2);
         ctx.rotate(Math.PI * 0.75);
@@ -135,11 +145,11 @@ export default function Canvas({
       }
 
     } else if (bt === "caligraphy2") {
-      if (stroke.points.length < 2) { ctx.restore(); return; }
+      if (pts.length < 2) { ctx.restore(); return; }
       ctx.globalAlpha = stroke.opacity;
       const w = sz, h = Math.max(1, sz * 0.18);
-      for (let i = 1; i < stroke.points.length; i++) {
-        const a = stroke.points[i-1], bPt = stroke.points[i];
+      for (let i = Math.max(start, 1); i < pts.length; i++) {
+        const a = pts[i-1], bPt = pts[i];
         ctx.save();
         ctx.translate((a.x+bPt.x)/2, (a.y+bPt.y)/2);
         ctx.rotate(Math.PI * 0.25);
@@ -149,113 +159,113 @@ export default function Canvas({
       }
 
     } else if (bt === "airbrush") {
-      const density = Math.max(12, sz * 3);
+      const density = Math.max(8, Math.floor(sz * 2));
       const radius  = sz * 1.8;
-      for (let p = 0; p < stroke.points.length; p++) {
-        const pt = stroke.points[p];
-        ctx.fillStyle = erasing ? "#000" : `rgba(${r},${g},${b},${stroke.opacity * 0.25})`;
+      ctx.fillStyle = erasing ? "#000" : `rgba(${r},${g},${b},${stroke.opacity * 0.22})`;
+      for (let p = start; p < pts.length; p++) {
+        const pt = pts[p];
         for (let i = 0; i < density; i++) {
-          const ang = prng(p*9973+i*6271)*Math.PI*2;
-          const rad = Math.sqrt(prng(p*1009+i*7919))*radius;
+          const ang = prng(p*9973+i*6271) * Math.PI * 2;
+          const rad = Math.sqrt(prng(p*1009+i*7919)) * radius;
           ctx.beginPath();
-          ctx.arc(pt.x+Math.cos(ang)*rad, pt.y+Math.sin(ang)*rad, 0.6, 0, Math.PI*2);
+          ctx.arc(pt.x + Math.cos(ang)*rad, pt.y + Math.sin(ang)*rad, 0.7, 0, Math.PI*2);
           ctx.fill();
         }
       }
 
     } else if (bt === "oil") {
-      if (stroke.points.length < 2) { ctx.restore(); return; }
+      if (pts.length < 2) { ctx.restore(); return; }
       const bristles = Math.max(4, Math.floor(sz * 0.6));
       for (let b2 = 0; b2 < bristles; b2++) {
-        const alphaVar = 0.55 + prng(b2*3571)*0.45;
-        ctx.globalAlpha = stroke.opacity * alphaVar;
+        ctx.globalAlpha = stroke.opacity * (0.55 + prng(b2*3571)*0.45);
         ctx.strokeStyle = erasing ? "#000"
           : `rgba(${Math.min(255,r+Math.floor(prng(b2*13)*30-15))},${Math.min(255,g+Math.floor(prng(b2*17)*30-15))},${Math.min(255,b+Math.floor(prng(b2*19)*30-15))},1)`;
         ctx.lineWidth = Math.max(0.8, sz*0.12);
         ctx.lineCap = "round"; ctx.lineJoin = "round";
         ctx.beginPath();
-        for (let i = 0; i < stroke.points.length; i++) {
-          const pt = stroke.points[i];
+        let moved = false;
+        for (let i = start; i < pts.length; i++) {
+          const pt = pts[i];
           let dx=0, dy=1;
           if (i > 0) {
-            dx = pt.x-stroke.points[i-1].x;
-            dy = pt.y-stroke.points[i-1].y;
-            const len = Math.sqrt(dx*dx+dy*dy)||1;
-            dx/=len; dy/=len;
+            dx = pt.x-pts[i-1].x; dy = pt.y-pts[i-1].y;
+            const len = Math.sqrt(dx*dx+dy*dy)||1; dx/=len; dy/=len;
           }
-          const px = -dy*(b2/(bristles-1||1)-0.5)*sz + prng(b2*1009+i*503)*sz*0.08;
-          const py =  dx*(b2/(bristles-1||1)-0.5)*sz + prng(b2*2003+i*701)*sz*0.08;
-          if (i===0) ctx.moveTo(pt.x+px, pt.y+py);
-          else       ctx.lineTo(pt.x+px, pt.y+py);
+          const t = bristles > 1 ? b2/(bristles-1)-0.5 : 0;
+          const px = -dy*t*sz + prng(b2*1009+i*503)*sz*0.06;
+          const py =  dx*t*sz + prng(b2*2003+i*701)*sz*0.06;
+          if (!moved) { ctx.moveTo(pt.x+px, pt.y+py); moved=true; }
+          else          ctx.lineTo(pt.x+px, pt.y+py);
         }
         ctx.stroke();
       }
 
     } else if (bt === "crayon") {
-      if (stroke.points.length < 2) { ctx.restore(); return; }
-      const grain = Math.max(3, Math.floor(sz*0.55));
+      if (pts.length < 2) { ctx.restore(); return; }
+      const grain = Math.max(3, Math.floor(sz*0.5));
       for (let g2=0; g2<grain; g2++) {
-        const offX = (prng(g2*4001)-0.5)*sz*0.9;
-        const offY = (prng(g2*5003)-0.5)*sz*0.9;
-        ctx.globalAlpha = (0.15+prng(g2*7001)*0.35)*stroke.opacity;
+        const offX = (prng(g2*4001)-0.5)*sz*0.85;
+        const offY = (prng(g2*5003)-0.5)*sz*0.85;
+        ctx.globalAlpha = (0.12+prng(g2*7001)*0.3)*stroke.opacity;
         ctx.strokeStyle = erasing ? "#000" : col;
-        ctx.lineWidth = Math.max(0.5, sz*0.09+prng(g2*3007)*sz*0.08);
+        ctx.lineWidth = Math.max(0.4, sz*0.08+prng(g2*3007)*sz*0.07);
         ctx.lineCap="round"; ctx.lineJoin="round";
         ctx.beginPath();
-        ctx.moveTo(stroke.points[0].x+offX, stroke.points[0].y+offY);
-        for (let i=1; i<stroke.points.length; i++) {
-          const jx = offX+(prng(g2*1009+i*503)-0.5)*sz*0.15;
-          const jy = offY+(prng(g2*2003+i*701)-0.5)*sz*0.15;
-          ctx.lineTo(stroke.points[i].x+jx, stroke.points[i].y+jy);
+        ctx.moveTo(pts[start].x+offX, pts[start].y+offY);
+        for (let i=start+1; i<pts.length; i++) {
+          const jx = offX+(prng(g2*1009+i*503)-0.5)*sz*0.12;
+          const jy = offY+(prng(g2*2003+i*701)-0.5)*sz*0.12;
+          ctx.lineTo(pts[i].x+jx, pts[i].y+jy);
         }
         ctx.stroke();
       }
 
     } else if (bt === "marker") {
-      if (stroke.points.length < 2) { ctx.restore(); return; }
+      if (pts.length < 2) { ctx.restore(); return; }
       ctx.globalAlpha = Math.min(1, stroke.opacity*1.1);
       ctx.strokeStyle = erasing ? "#000" : col;
       ctx.lineWidth = sz; ctx.lineCap="square"; ctx.lineJoin="miter";
       ctx.beginPath();
-      ctx.moveTo(stroke.points[0].x, stroke.points[0].y);
-      for (let i=1; i<stroke.points.length; i++)
-        ctx.lineTo(stroke.points[i].x, stroke.points[i].y);
+      ctx.moveTo(pts[start].x, pts[start].y);
+      for (let i=start+1; i<pts.length; i++)
+        ctx.lineTo(pts[i].x, pts[i].y);
       ctx.stroke();
 
     } else if (bt === "pencil") {
-      if (stroke.points.length < 2) { ctx.restore(); return; }
-      const lines = Math.max(2, Math.floor(sz*0.45));
+      if (pts.length < 2) { ctx.restore(); return; }
+      const lines = Math.max(2, Math.floor(sz*0.4));
       for (let l=0; l<lines; l++) {
-        const offX = (prng(l*2017)-0.5)*sz*0.7;
-        const offY = (prng(l*3019)-0.5)*sz*0.7;
-        ctx.globalAlpha = (0.08+prng(l*9001)*0.18)*stroke.opacity;
+        const offX = (prng(l*2017)-0.5)*sz*0.65;
+        const offY = (prng(l*3019)-0.5)*sz*0.65;
+        ctx.globalAlpha = (0.07+prng(l*9001)*0.15)*stroke.opacity;
         ctx.strokeStyle = erasing ? "#000" : col;
-        ctx.lineWidth = 0.5+prng(l*4001)*0.5;
+        ctx.lineWidth = 0.4+prng(l*4001)*0.5;
         ctx.lineCap="round";
         ctx.beginPath();
-        ctx.moveTo(stroke.points[0].x+offX, stroke.points[0].y+offY);
-        for (let i=1; i<stroke.points.length; i++)
-          ctx.lineTo(stroke.points[i].x+offX, stroke.points[i].y+offY);
+        ctx.moveTo(pts[start].x+offX, pts[start].y+offY);
+        for (let i=start+1; i<pts.length; i++)
+          ctx.lineTo(pts[i].x+offX, pts[i].y+offY);
         ctx.stroke();
       }
 
     } else if (bt === "watercolor") {
       for (let pass=0; pass<3; pass++) {
-        ctx.globalAlpha = stroke.opacity*0.12;
-        for (const pt of stroke.points) {
+        ctx.globalAlpha = stroke.opacity * 0.1;
+        for (let p=start; p<pts.length; p++) {
+          const pt = pts[p];
           const spread = sz*(0.9+pass*0.3);
           const grad = ctx.createRadialGradient(
-            pt.x+(prng(pass*9901+pt.x*7)-0.5)*sz*0.35,
-            pt.y+(prng(pass*8803+pt.y*7)-0.5)*sz*0.35,
+            pt.x+(prng(pass*9901+p*7)-0.5)*sz*0.3,
+            pt.y+(prng(pass*8803+p*11)-0.5)*sz*0.3,
             0, pt.x, pt.y, spread
           );
           if (erasing) {
             grad.addColorStop(0,"rgba(0,0,0,0.8)");
-            grad.addColorStop(0.6,"rgba(0,0,0,0.2)");
+            grad.addColorStop(0.6,"rgba(0,0,0,0.15)");
             grad.addColorStop(1,"rgba(0,0,0,0)");
           } else {
-            grad.addColorStop(0,`rgba(${r},${g},${b},0.9)`);
-            grad.addColorStop(0.5,`rgba(${r},${g},${b},0.3)`);
+            grad.addColorStop(0,`rgba(${r},${g},${b},0.85)`);
+            grad.addColorStop(0.5,`rgba(${r},${g},${b},0.25)`);
             grad.addColorStop(1,`rgba(${r},${g},${b},0)`);
           }
           ctx.fillStyle=grad;
@@ -268,90 +278,80 @@ export default function Canvas({
     ctx.restore();
   };
 
-  // ─── Offscreen: solo pinta los strokes nuevos (incrementalmente) ──────────
-  const flushToOffscreen = () => {
-    const off = offscreenRef.current;
-    if (!off) return;
-    const ctx = off.getContext("2d");
-    if (!ctx) return;
-    const v = viewRef.current;
-    const dpr = window.devicePixelRatio || 1;
+  // Dibujo completo del stroke (para flush a offscreen)
+  const drawStroke = (ctx: CanvasRenderingContext2D, stroke: Stroke) =>
+    drawStrokeFrom(ctx, stroke, 0);
 
-    ctx.save();
+  // ─── Offscreen ────────────────────────────────────────────────────────────
+  const getOffCtx = () => {
+    const off = offscreenRef.current;
+    if (!off) return null;
+    return off.getContext("2d");
+  };
+
+  const offTransform = (ctx: CanvasRenderingContext2D) => {
+    const dpr = window.devicePixelRatio || 1;
+    const v = viewRef.current;
     ctx.scale(dpr, dpr);
     ctx.translate(v.x, v.y);
     ctx.scale(v.scale, v.scale);
+  };
 
+  const flushToOffscreen = () => {
+    const ctx = getOffCtx(); if (!ctx) return;
     const strokes = strokesRef.current;
-    for (let i = offscreenCountRef.current; i < strokes.length; i++) {
+    ctx.save(); offTransform(ctx);
+    for (let i = offscreenCountRef.current; i < strokes.length; i++)
       drawStroke(ctx, strokes[i]);
-    }
     offscreenCountRef.current = strokes.length;
     ctx.restore();
   };
 
-  // Rebuilds offscreen desde cero (necesario al cambiar bgColor o zoom)
   const rebuildOffscreen = () => {
-    const off = offscreenRef.current;
-    const canvas = canvasRef.current;
-    if (!off || !canvas) return;
-    const ctx = off.getContext("2d");
-    if (!ctx) return;
-    const dpr = window.devicePixelRatio || 1;
-    const v = viewRef.current;
-
+    const off = offscreenRef.current; if (!off) return;
+    const ctx = off.getContext("2d"); if (!ctx) return;
     ctx.save();
     ctx.setTransform(1,0,0,1,0,0);
     ctx.clearRect(0, 0, off.width, off.height);
     ctx.fillStyle = bgColorRef.current;
     ctx.fillRect(0, 0, off.width, off.height);
     ctx.restore();
-
-    ctx.save();
-    ctx.scale(dpr, dpr);
-    ctx.translate(v.x, v.y);
-    ctx.scale(v.scale, v.scale);
+    ctx.save(); offTransform(ctx);
     strokesRef.current.forEach(s => drawStroke(ctx, s));
     ctx.restore();
-
     offscreenCountRef.current = strokesRef.current.length;
   };
 
-  const applyTransform = (ctx: CanvasRenderingContext2D) => {
-    const dpr = window.devicePixelRatio || 1;
-    const v = viewRef.current;
-    ctx.scale(dpr, dpr);
-    ctx.translate(v.x, v.y);
-    ctx.scale(v.scale, v.scale);
-  };
-
-  // ─── Composite: offscreen + stroke activo + cursores ─────────────────────
-  const composite = () => {
+  // ─── Composite (display) — se llama solo desde RAF ────────────────────────
+  const compositeNow = () => {
     const canvas = canvasRef.current;
     const off = offscreenRef.current;
     if (!canvas || !off) return;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
+    const ctx = canvas.getContext("2d"); if (!ctx) return;
 
     ctx.save();
     ctx.setTransform(1,0,0,1,0,0);
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    // Pegar offscreen (ya tiene fondo + strokes terminados)
     ctx.drawImage(off, 0, 0);
     ctx.restore();
 
-    // Stroke activo encima
     if (currentStrokeRef.current) {
+      const dpr = window.devicePixelRatio || 1;
+      const v = viewRef.current;
       ctx.save();
-      applyTransform(ctx);
+      ctx.scale(dpr, dpr);
+      ctx.translate(v.x, v.y);
+      ctx.scale(v.scale, v.scale);
       drawStroke(ctx, currentStrokeRef.current);
       ctx.restore();
     }
 
-    // Cursores
     const v = viewRef.current;
+    const dpr = window.devicePixelRatio || 1;
     ctx.save();
-    applyTransform(ctx);
+    ctx.scale(dpr, dpr);
+    ctx.translate(v.x, v.y);
+    ctx.scale(v.scale, v.scale);
     cursorsRef.current.forEach((cursor) => {
       ctx.beginPath();
       ctx.fillStyle = "#00ff88";
@@ -362,13 +362,19 @@ export default function Canvas({
       ctx.fillText(cursor.userId, cursor.x+10/v.scale, cursor.y-10/v.scale);
     });
     ctx.restore();
+
+    dirtyRef.current = false;
+    rafRef.current = null;
   };
 
-  // redraw completo (zoom, bgColor, init)
-  const redraw = () => {
-    rebuildOffscreen();
-    composite();
+  // Solicitar un frame — coalesce múltiples eventos en uno solo
+  const requestFrame = () => {
+    if (rafRef.current !== null) return; // ya hay uno pendiente
+    dirtyRef.current = true;
+    rafRef.current = requestAnimationFrame(compositeNow);
   };
+
+  const redraw = () => { rebuildOffscreen(); requestFrame(); };
 
   useEffect(() => { redraw(); }, [bgColor]);
 
@@ -377,20 +383,18 @@ export default function Canvas({
     if (!canvas) return;
 
     const dpr = window.devicePixelRatio || 1;
-    const w = window.innerWidth * dpr;
-    const h = window.innerHeight * dpr;
-    canvas.width  = w; canvas.height  = h;
+    const W = window.innerWidth * dpr;
+    const H = window.innerHeight * dpr;
+    canvas.width = W; canvas.height = H;
     canvas.style.width  = window.innerWidth  + "px";
     canvas.style.height = window.innerHeight + "px";
 
-    // Crear offscreen del mismo tamaño
     const off = document.createElement("canvas");
-    off.width = w; off.height = h;
+    off.width = W; off.height = H;
     offscreenRef.current = off;
-    // Pintar fondo inicial
     const offCtx = off.getContext("2d")!;
     offCtx.fillStyle = bgColorRef.current;
-    offCtx.fillRect(0, 0, w, h);
+    offCtx.fillRect(0, 0, W, H);
 
     const room = new URLSearchParams(window.location.search).get("room") || "default";
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
@@ -409,25 +413,24 @@ export default function Canvas({
         if (data.bgColor) onBgColor?.(data.bgColor);
         redraw(); return;
       }
-      if (data.type === "users")   { setUsers?.(data.users||[]); return; }
-      if (data.type === "stroke")  {
+      if (data.type === "users")  { setUsers?.(data.users||[]); return; }
+      if (data.type === "stroke") {
         strokesRef.current.push(data.stroke);
-        // Solo pintar el nuevo stroke en offscreen
         flushToOffscreen();
-        composite();
+        requestFrame();
         return;
       }
-      if (data.type === "clear")   {
+      if (data.type === "clear") {
         strokesRef.current = [];
         offscreenCountRef.current = 0;
         rebuildOffscreen();
-        composite();
+        requestFrame();
         return;
       }
       if (data.type === "bgcolor") { onBgColor?.(data.color); return; }
-      if (data.type === "cursor")  {
+      if (data.type === "cursor") {
         cursorsRef.current.set(data.userId, { x:data.x, y:data.y, userId:data.username });
-        composite(); // solo composite, offscreen no cambia
+        requestFrame();
       }
     };
 
@@ -471,7 +474,7 @@ export default function Canvas({
         if (wsRef.current?.readyState===WebSocket.OPEN)
           wsRef.current.send(JSON.stringify({type:"cursor",x:world.x,y:world.y}));
         currentStrokeRef.current.points.push(world);
-        composite(); // ← solo composite, NO redraw completo
+        requestFrame(); // ← solo pide frame, no dibuja ahora
         return;
       }
 
@@ -479,15 +482,15 @@ export default function Canvas({
       if (touchPointersRef.current.size===2) {
         const info=getPinchInfo();
         const v=viewRef.current;
-        const scaleRatio=info.dist/lastPinchDist;
-        const newScale=Math.min(MAX_SCALE,Math.max(MIN_SCALE,v.scale*scaleRatio));
+        const sr=info.dist/lastPinchDist;
+        const ns=Math.min(MAX_SCALE,Math.max(MIN_SCALE,v.scale*sr));
         viewRef.current={
-          x:info.mid.x-(lastPinchMid.x-v.x)*(newScale/v.scale)-(lastPinchMid.x-info.mid.x),
-          y:info.mid.y-(lastPinchMid.y-v.y)*(newScale/v.scale)-(lastPinchMid.y-info.mid.y),
-          scale:newScale,
+          x:info.mid.x-(lastPinchMid.x-v.x)*(ns/v.scale)-(lastPinchMid.x-info.mid.x),
+          y:info.mid.y-(lastPinchMid.y-v.y)*(ns/v.scale)-(lastPinchMid.y-info.mid.y),
+          scale:ns,
         };
         lastPinchDist=info.dist; lastPinchMid=info.mid;
-        redraw(); return; // zoom → rebuild completo
+        redraw(); return;
       }
 
       if (!currentStrokeRef.current) return;
@@ -495,19 +498,18 @@ export default function Canvas({
       if (wsRef.current?.readyState===WebSocket.OPEN)
         wsRef.current.send(JSON.stringify({type:"cursor",x:world.x,y:world.y}));
       currentStrokeRef.current.points.push(world);
-      composite();
+      requestFrame();
     };
 
     const finishStroke = () => {
       if (!currentStrokeRef.current) return;
       const stroke = currentStrokeRef.current;
       strokesRef.current.push(stroke);
-      // Pintar en offscreen y limpiar stroke activo
       flushToOffscreen();
       currentStrokeRef.current = null;
       if (wsRef.current?.readyState===WebSocket.OPEN)
         wsRef.current.send(JSON.stringify({type:"stroke",stroke}));
-      composite();
+      requestFrame();
     };
 
     const onPointerUp = (e: PointerEvent) => {
@@ -522,13 +524,9 @@ export default function Canvas({
       const mx=e.clientX-rect.left, my=e.clientY-rect.top;
       const v=viewRef.current;
       const delta=e.deltaY<0?1.12:0.9;
-      const newScale=Math.min(MAX_SCALE,Math.max(MIN_SCALE,v.scale*delta));
-      viewRef.current={
-        x:mx-(mx-v.x)*(newScale/v.scale),
-        y:my-(my-v.y)*(newScale/v.scale),
-        scale:newScale,
-      };
-      redraw(); // zoom → rebuild
+      const ns=Math.min(MAX_SCALE,Math.max(MIN_SCALE,v.scale*delta));
+      viewRef.current={ x:mx-(mx-v.x)*(ns/v.scale), y:my-(my-v.y)*(ns/v.scale), scale:ns };
+      redraw();
     };
 
     canvas.addEventListener("pointerdown",   onPointerDown);
@@ -540,10 +538,10 @@ export default function Canvas({
     const savePNG = () => {
       const saved={...viewRef.current};
       viewRef.current={x:0,y:0,scale:1};
-      redraw();
+      rebuildOffscreen();
       const link=document.createElement("a");
       link.download=`drawbot-${Date.now()}.png`;
-      link.href=canvas.toDataURL("image/png");
+      link.href=(offscreenRef.current as HTMLCanvasElement).toDataURL("image/png");
       link.click();
       viewRef.current=saved;
       redraw();
@@ -551,6 +549,7 @@ export default function Canvas({
     onReady?.(savePNG);
 
     return () => {
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
       wsRef.current?.close();
       canvas.removeEventListener("pointerdown",   onPointerDown);
       canvas.removeEventListener("pointermove",   onPointerMove);
