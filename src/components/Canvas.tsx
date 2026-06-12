@@ -156,8 +156,8 @@ export default function Canvas({
       const rect = canvas.getBoundingClientRect();
       const pos = { x: e.clientX - rect.left, y: e.clientY - rect.top };
 
-      // lápiz → siempre dibuja, ignora pinch
-      if (e.pointerType === "pen") {
+      // lápiz o mouse → siempre dibuja, ignora pinch
+      if (e.pointerType === "pen" || e.pointerType === "mouse") {
         const world = toWorld(pos.x, pos.y);
         currentStrokeRef.current = {
           points: [world],
@@ -196,7 +196,7 @@ export default function Canvas({
       const rect = canvas.getBoundingClientRect();
       const pos = { x: e.clientX - rect.left, y: e.clientY - rect.top };
 
-      if (e.pointerType === "pen") {
+      if (e.pointerType === "pen" || e.pointerType === "mouse") {
         if (!currentStrokeRef.current) return;
         const world = toWorld(pos.x, pos.y);
         if (wsRef.current?.readyState === WebSocket.OPEN)
@@ -261,8 +261,8 @@ export default function Canvas({
         redraw();
       }
 
-      // lápiz suelto
-      if (e.pointerType === "pen" && currentStrokeRef.current) {
+      // lápiz o mouse suelto
+      if ((e.pointerType === "pen" || e.pointerType === "mouse") && currentStrokeRef.current) {
         const stroke = currentStrokeRef.current;
         strokesRef.current.push(stroke);
         if (wsRef.current?.readyState === WebSocket.OPEN)
