@@ -1,7 +1,4 @@
 {
-  "build": {
-    "buildCommand": "cd .. && npm run build && cd backend"
-  },
   "deploy": {
     "startCommand": "bun run server.ts",
     "restartPolicyType": "ON_FAILURE",
