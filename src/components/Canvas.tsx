@@ -33,11 +33,10 @@ export default function Canvas({
   const sizeRef    = useRef(brushSize);
   const opacityRef = useRef(opacity);
   const eraserRef  = useRef(eraser);
+  const viewRef    = useRef({ x: 0, y: 0, scale: 1 });
 
-  const viewRef = useRef({ x: 0, y: 0, scale: 1 });
-
-  // active pointers for pinch detection
-  const pointersRef = useRef<Map<number, { x: number; y: number }>>(new Map());
+  // solo dedos (touch) para pinch — lápiz nunca entra aquí
+  const touchPointersRef = useRef<Map<number, { x: number; y: number }>>(new Map());
 
   colorRef.current   = color;
   sizeRef.current    = brushSize;
@@ -88,12 +87,10 @@ export default function Canvas({
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
-
     ctx.save();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.restore();
-
     ctx.save();
     applyTransform(ctx);
     strokesRef.current.forEach((s) => drawStroke(ctx, s));
@@ -141,13 +138,11 @@ export default function Canvas({
       }
     };
 
-    const getScreenPos = (e: PointerEvent) => {
-      const rect = canvas.getBoundingClientRect();
-      return { x: e.clientX - rect.left, y: e.clientY - rect.top };
-    };
+    let lastPinchDist = 0;
+    let lastPinchMid  = { x: 0, y: 0 };
 
     const getPinchInfo = () => {
-      const pts = Array.from(pointersRef.current.values());
+      const pts = Array.from(touchPointersRef.current.values());
       const dx = pts[1].x - pts[0].x;
       const dy = pts[1].y - pts[0].y;
       return {
@@ -156,19 +151,28 @@ export default function Canvas({
       };
     };
 
-    let lastPinchDist = 0;
-    let lastPinchMid  = { x: 0, y: 0 };
-
     const onPointerDown = (e: PointerEvent) => {
       canvas.setPointerCapture(e.pointerId);
       const rect = canvas.getBoundingClientRect();
-      pointersRef.current.set(e.pointerId, {
-        x: e.clientX - rect.left,
-        y: e.clientY - rect.top,
-      });
+      const pos = { x: e.clientX - rect.left, y: e.clientY - rect.top };
 
-      if (pointersRef.current.size === 2) {
-        // empieza pinch — cancelar trazo activo
+      // lápiz → siempre dibuja, ignora pinch
+      if (e.pointerType === "pen") {
+        const world = toWorld(pos.x, pos.y);
+        currentStrokeRef.current = {
+          points: [world],
+          color:   colorRef.current,
+          size:    sizeRef.current,
+          opacity: opacityRef.current,
+          eraser:  eraserRef.current,
+        };
+        return;
+      }
+
+      // dedo → rastrear para pinch
+      touchPointersRef.current.set(e.pointerId, pos);
+
+      if (touchPointersRef.current.size === 2) {
         currentStrokeRef.current = null;
         const info = getPinchInfo();
         lastPinchDist = info.dist;
@@ -176,9 +180,8 @@ export default function Canvas({
         return;
       }
 
-      if (pointersRef.current.size === 1) {
-        const screen = getScreenPos(e);
-        const world = toWorld(screen.x, screen.y);
+      if (touchPointersRef.current.size === 1) {
+        const world = toWorld(pos.x, pos.y);
         currentStrokeRef.current = {
           points: [world],
           color:   colorRef.current,
@@ -191,38 +194,48 @@ export default function Canvas({
 
     const onPointerMove = (e: PointerEvent) => {
       const rect = canvas.getBoundingClientRect();
-      pointersRef.current.set(e.pointerId, {
-        x: e.clientX - rect.left,
-        y: e.clientY - rect.top,
-      });
+      const pos = { x: e.clientX - rect.left, y: e.clientY - rect.top };
 
-      // pinch con 2 dedos
-      if (pointersRef.current.size === 2) {
+      if (e.pointerType === "pen") {
+        if (!currentStrokeRef.current) return;
+        const world = toWorld(pos.x, pos.y);
+        if (wsRef.current?.readyState === WebSocket.OPEN)
+          wsRef.current.send(JSON.stringify({ type: "cursor", x: world.x, y: world.y }));
+        currentStrokeRef.current.points.push(world);
+        redraw();
+        const ctx = canvas.getContext("2d");
+        if (ctx) {
+          ctx.save();
+          applyTransform(ctx);
+          drawStroke(ctx, currentStrokeRef.current);
+          ctx.restore();
+        }
+        return;
+      }
+
+      // dedo
+      touchPointersRef.current.set(e.pointerId, pos);
+
+      if (touchPointersRef.current.size === 2) {
         const info = getPinchInfo();
         const v = viewRef.current;
         const scaleRatio = info.dist / lastPinchDist;
         const newScale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, v.scale * scaleRatio));
-
         viewRef.current = {
           x: info.mid.x - (lastPinchMid.x - v.x) * (newScale / v.scale) - (lastPinchMid.x - info.mid.x),
           y: info.mid.y - (lastPinchMid.y - v.y) * (newScale / v.scale) - (lastPinchMid.y - info.mid.y),
           scale: newScale,
         };
-
         lastPinchDist = info.dist;
         lastPinchMid  = info.mid;
         redraw();
         return;
       }
 
-      // dibujo con 1 dedo
       if (!currentStrokeRef.current) return;
-      const screen = getScreenPos(e);
-      const world = toWorld(screen.x, screen.y);
-
+      const world = toWorld(pos.x, pos.y);
       if (wsRef.current?.readyState === WebSocket.OPEN)
         wsRef.current.send(JSON.stringify({ type: "cursor", x: world.x, y: world.y }));
-
       currentStrokeRef.current.points.push(world);
       redraw();
       const ctx = canvas.getContext("2d");
@@ -235,9 +248,21 @@ export default function Canvas({
     };
 
     const onPointerUp = (e: PointerEvent) => {
-      pointersRef.current.delete(e.pointerId);
+      if (e.pointerType === "touch") {
+        touchPointersRef.current.delete(e.pointerId);
+      }
 
-      if (currentStrokeRef.current && pointersRef.current.size === 0) {
+      if (currentStrokeRef.current && touchPointersRef.current.size === 0) {
+        const stroke = currentStrokeRef.current;
+        strokesRef.current.push(stroke);
+        if (wsRef.current?.readyState === WebSocket.OPEN)
+          wsRef.current.send(JSON.stringify({ type: "stroke", stroke }));
+        currentStrokeRef.current = null;
+        redraw();
+      }
+
+      // lápiz suelto
+      if (e.pointerType === "pen" && currentStrokeRef.current) {
         const stroke = currentStrokeRef.current;
         strokesRef.current.push(stroke);
         if (wsRef.current?.readyState === WebSocket.OPEN)
@@ -247,7 +272,6 @@ export default function Canvas({
       }
     };
 
-    // rueda del mouse (PC)
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
       const rect = canvas.getBoundingClientRect();
@@ -264,10 +288,10 @@ export default function Canvas({
       redraw();
     };
 
-    canvas.addEventListener("pointerdown",  onPointerDown);
-    canvas.addEventListener("pointermove",  onPointerMove);
-    canvas.addEventListener("pointerup",    onPointerUp);
-    canvas.addEventListener("pointercancel",onPointerUp);
+    canvas.addEventListener("pointerdown",   onPointerDown);
+    canvas.addEventListener("pointermove",   onPointerMove);
+    canvas.addEventListener("pointerup",     onPointerUp);
+    canvas.addEventListener("pointercancel", onPointerUp);
     canvas.addEventListener("wheel", onWheel, { passive: false });
 
     const savePNG = () => {
