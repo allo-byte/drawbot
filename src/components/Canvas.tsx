@@ -39,6 +39,10 @@ export default function Canvas({
   opacityRef.current = opacity;
   eraserRef.current  = eraser;
 
+  // dimensiones lógicas (CSS pixels) para clearRect y coordenadas
+  const logicalW = () => window.innerWidth;
+  const logicalH = () => window.innerHeight;
+
   const drawStroke = (ctx: CanvasRenderingContext2D, stroke: Stroke) => {
     if (stroke.points.length < 2) return;
     ctx.beginPath();
@@ -67,7 +71,8 @@ export default function Canvas({
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    // usar dimensiones lógicas porque el ctx ya tiene scale(dpr, dpr)
+    ctx.clearRect(0, 0, logicalW(), logicalH());
     strokesRef.current.forEach((s) => drawStroke(ctx, s));
     cursorsRef.current.forEach((cursor) => {
       ctx.beginPath();
@@ -89,12 +94,11 @@ export default function Canvas({
     canvas.height = window.innerHeight * dpr;
     canvas.style.width  = window.innerWidth + "px";
     canvas.style.height = window.innerHeight + "px";
-    const initCtx = canvas.getContext("2d");
-    if (initCtx) initCtx.scale(dpr, dpr);
+    const ctx = canvas.getContext("2d");
+    if (ctx) ctx.scale(dpr, dpr);
 
     const room = new URLSearchParams(window.location.search).get("room") || "default";
 
-    // En producción el WS está en la misma URL que el frontend
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const wsUrl = import.meta.env.VITE_WS_URL || `${protocol}//${window.location.host}`;
     wsRef.current = new WebSocket(wsUrl);
