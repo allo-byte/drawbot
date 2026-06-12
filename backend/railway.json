@@ -1,6 +1,5 @@
 {
   "build": {
-    "builder": "NIXPACKS",
     "buildCommand": "cd .. && npm run build && cd backend"
   },
   "deploy": {
