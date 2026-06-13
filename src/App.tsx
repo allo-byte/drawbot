@@ -9,6 +9,7 @@ function App() {
   const [opacity,   setOpacity  ] = useState(1);
   const [eraser,    setEraser   ] = useState(false);
   const [brushType, setBrushType] = useState<BrushType>("pen");
+  const [panMode,   setPanMode  ] = useState(false);
   const [bgColor,   setBgColor  ] = useState("#111111");
   const [savePNG,   setSavePNG  ] = useState<() => void>(() => () => {});
   const [users,     setUsers    ] = useState<string[]>([]);
@@ -42,6 +43,8 @@ function App() {
         setEraser={setEraser}
         brushType={brushType}
         setBrushType={setBrushType}
+        panMode={panMode}
+        setPanMode={setPanMode}
         bgColor={bgColor}
         setBgColor={(c: string) => {
           setBgColor(c);
@@ -63,6 +66,7 @@ function App() {
         opacity={opacity}
         eraser={eraser}
         brushType={brushType}
+        panMode={panMode}
         bgColor={bgColor}
         setUsers={setUsers}
         onReady={(saveFn) => setSavePNG(() => saveFn)}

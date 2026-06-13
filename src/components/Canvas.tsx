@@ -28,6 +28,7 @@ type Props = {
   opacity: number;
   eraser: boolean;
   brushType: BrushType;
+  panMode: boolean;
   username: string;
   bgColor: string;
   setUsers?: (users: string[]) => void;
@@ -57,7 +58,7 @@ const WORLD_W = 4096;
 const WORLD_H = 4096;
 
 export default function Canvas({
-  color, brushSize, opacity, eraser, brushType, username,
+  color, brushSize, opacity, eraser, brushType, panMode, username,
   bgColor, setUsers, onReady, onBgColor,
 }: Props) {
   const canvasRef         = useRef<HTMLCanvasElement>(null);
@@ -75,7 +76,9 @@ export default function Canvas({
   const opacityRef   = useRef(opacity);
   const eraserRef    = useRef(eraser);
   const brushTypeRef = useRef(brushType);
+  const panModeRef   = useRef(panMode);
   const bgColorRef   = useRef(bgColor);
+  const panStartRef  = useRef<{x:number;y:number;vx:number;vy:number} | null>(null);
   const viewRef      = useRef({ x: 0, y: 0, scale: 1 });
   const touchPointersRef = useRef<Map<number, {x:number;y:number}>>(new Map());
 
@@ -84,6 +87,7 @@ export default function Canvas({
   opacityRef.current   = opacity;
   eraserRef.current    = eraser;
   brushTypeRef.current = brushType;
+  panModeRef.current   = panMode;
   bgColorRef.current   = bgColor;
 
   const MIN_SCALE = 0.1;
@@ -408,7 +412,13 @@ export default function Canvas({
       canvas.setPointerCapture(e.pointerId);
       const rect = canvas.getBoundingClientRect();
       const pos = { x:e.clientX-rect.left, y:e.clientY-rect.top };
-      if (e.pointerType==="pen"||e.pointerType==="mouse") { startStroke(pos); return; }
+      if (e.pointerType==="pen"||e.pointerType==="mouse") {
+        if (panModeRef.current) {
+          panStartRef.current = { x:pos.x, y:pos.y, vx:viewRef.current.x, vy:viewRef.current.y };
+          return;
+        }
+        startStroke(pos); return;
+      }
       touchPointersRef.current.set(e.pointerId, pos);
       if (touchPointersRef.current.size===2) {
         currentStrokeRef.current = null;
@@ -422,6 +432,17 @@ export default function Canvas({
       const pos = { x:e.clientX-rect.left, y:e.clientY-rect.top };
 
       if (e.pointerType==="pen"||e.pointerType==="mouse") {
+        // Modo mano — arrastrar
+        if (panModeRef.current && panStartRef.current) {
+          const dx = pos.x - panStartRef.current.x;
+          const dy = pos.y - panStartRef.current.y;
+          viewRef.current = { ...viewRef.current,
+            x: panStartRef.current.vx + dx,
+            y: panStartRef.current.vy + dy,
+          };
+          requestFrame();
+          return;
+        }
         if (!currentStrokeRef.current) return;
         const world = toWorld(pos.x, pos.y);
         if (wsRef.current?.readyState===WebSocket.OPEN)
@@ -467,6 +488,9 @@ export default function Canvas({
     };
 
     const onPointerUp = (e: PointerEvent) => {
+      if (e.pointerType==="pen"||e.pointerType==="mouse") {
+        panStartRef.current = null;
+      }
       if (e.pointerType==="touch") touchPointersRef.current.delete(e.pointerId);
       if (currentStrokeRef.current && touchPointersRef.current.size===0) finishStroke();
       if ((e.pointerType==="pen"||e.pointerType==="mouse") && currentStrokeRef.current) finishStroke();
@@ -523,6 +547,7 @@ export default function Canvas({
         width:"calc(100vw - 52px)",
         height:"calc(100vh - 52px)",
         display:"block",
+        cursor: panMode ? "grab" : "crosshair",
         touchAction:"none", WebkitUserSelect:"none", userSelect:"none",
         // @ts-ignore
         WebkitTouchCallout:"none",

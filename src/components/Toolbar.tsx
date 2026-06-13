@@ -17,6 +17,8 @@ type Props = {
   setBrushType: Setter<BrushType>;
   bgColor: string;
   setBgColor: Setter<string>;
+  panMode: boolean;
+  setPanMode: Setter<boolean>;
   savePNG: () => void;
   users: string[];
   username: string;
@@ -129,41 +131,54 @@ function UserAvatar({ name, size = 28 }: { name: string; size?: number }) {
 }
 
 // Slider vertical reutilizable
-function VSlider({ value, min, max, onChange, color = "#7070dd" }: {
+function VSlider({ value, min, max, onChange, color = "#7070dd", label }: {
   value: number; min: number; max: number;
-  onChange: (v: number) => void; color?: string;
+  onChange: (v: number) => void; color?: string; label?: string;
 }) {
   const pct = ((value - min) / (max - min)) * 100;
-  const trackH = 200;
+  const trackRef = useRef<HTMLDivElement>(null);
+
+  const handlePointer = (e: React.PointerEvent) => {
+    e.currentTarget.setPointerCapture(e.pointerId);
+    const calc = (ev: PointerEvent) => {
+      const rect = trackRef.current!.getBoundingClientRect();
+      const t = 1 - Math.max(0, Math.min(1, (ev.clientY - rect.top) / rect.height));
+      onChange(Math.round(min + t * (max - min)));
+    };
+    const up = (ev: PointerEvent) => {
+      e.currentTarget.releasePointerCapture(ev.pointerId);
+      e.currentTarget.removeEventListener("pointermove", calc as any);
+      e.currentTarget.removeEventListener("pointerup", up as any);
+    };
+    (e.currentTarget as HTMLDivElement).addEventListener("pointermove", calc as any);
+    (e.currentTarget as HTMLDivElement).addEventListener("pointerup", up as any);
+    calc(e.nativeEvent as PointerEvent);
+  };
+
   return (
-    <div style={{ position:"relative", width:28, height:trackH, display:"flex",
-      alignItems:"center", justifyContent:"center", cursor:"pointer" }}
-      onPointerDown={e => {
-        const el = e.currentTarget;
-        const move = (ev: PointerEvent) => {
-          const rect = el.getBoundingClientRect();
-          const t = 1 - Math.max(0, Math.min(1, (ev.clientY - rect.top) / rect.height));
-          onChange(Math.round(min + t * (max - min)));
-        };
-        const up = () => { window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up); };
-        window.addEventListener("pointermove", move);
-        window.addEventListener("pointerup", up);
-        move(e.nativeEvent as PointerEvent);
-      }}>
-      {/* Track */}
-      <div style={{ position:"absolute", left:"50%", top:0, bottom:0,
-        width:4, transform:"translateX(-50%)", borderRadius:2,
-        background:"#2a2a2a" }}/>
-      {/* Fill */}
-      <div style={{ position:"absolute", left:"50%", bottom:0,
-        width:4, transform:"translateX(-50%)", borderRadius:2,
-        height:`${pct}%`, background:color, transition:"height .05s" }}/>
-      {/* Thumb */}
-      <div style={{ position:"absolute", left:"50%", transform:"translateX(-50%)",
-        top:`${100 - pct}%`, marginTop:-10,
-        width:20, height:20, borderRadius:"50%",
-        background:"#fff", border:`2px solid ${color}`,
-        boxShadow:"0 2px 6px rgba(0,0,0,0.5)" }}/>
+    <div style={{ display:"flex", flexDirection:"column", alignItems:"center", gap:6, userSelect:"none" }}>
+      {label && <span style={{ fontSize:9, color:"#555", textTransform:"uppercase", letterSpacing:".06em" }}>{label}</span>}
+      <div ref={trackRef}
+        style={{ position:"relative", width:28, height:220, cursor:"ns-resize",
+          display:"flex", alignItems:"center", justifyContent:"center", touchAction:"none" }}
+        onPointerDown={handlePointer}>
+        {/* Track bg */}
+        <div style={{ position:"absolute", left:"50%", top:0, bottom:0, width:6,
+          transform:"translateX(-50%)", borderRadius:3, background:"#222" }}/>
+        {/* Fill */}
+        <div style={{ position:"absolute", left:"50%", bottom:0, width:6,
+          transform:"translateX(-50%)", borderRadius:3,
+          height:`${pct}%`, background:color }}/>
+        {/* Thumb */}
+        <div style={{ position:"absolute", left:"50%", transform:"translateX(-50%)",
+          top:`${100-pct}%`, marginTop:-12,
+          width:24, height:24, borderRadius:"50%",
+          background:"#1e1e1e", border:`2.5px solid ${color}`,
+          boxShadow:`0 0 0 3px ${color}22, 0 2px 8px rgba(0,0,0,0.6)` }}/>
+      </div>
+      <span style={{ fontSize:11, color:"#888", minWidth:32, textAlign:"center" }}>
+        {value}{label==="OPA" ? "%" : ""}
+      </span>
     </div>
   );
 }
@@ -172,6 +187,7 @@ export default function Toolbar({
   color, setColor, brushSize, setBrushSize,
   opacity, setOpacity, eraser, setEraser,
   brushType, setBrushType, bgColor, setBgColor,
+  panMode, setPanMode,
   savePNG, users, username, setUsername, room, createRoom, copyRoomLink,
 }: Props) {
   const [showBrushes,  setShowBrushes ] = useState(false);
@@ -433,9 +449,16 @@ export default function Toolbar({
 
         <div className="tb-sep"/>
 
+        {/* Herramienta mano */}
+        <div className={`tb-btn${panMode ? " active" : ""}`}
+          onClick={() => { setPanMode(!panMode); if (!panMode) setEraser(false); }}
+          title="Mover lienzo" style={{ fontSize:16 }}>
+          ✋
+        </div>
+
         {/* Borrador */}
-        <div className={`tb-btn${eraser ? " eraser-active" : ""}`}
-          onClick={() => setEraser(!eraser)} title="Borrador">
+        <div className={`tb-btn${eraser && !panMode ? " eraser-active" : ""}`}
+          onClick={() => { setEraser(!eraser); setPanMode(false); }} title="Borrador">
           {BRUSH_ICONS.eraser}
         </div>
 
@@ -470,22 +493,11 @@ export default function Toolbar({
       ═══════════════════════════════════════════════ */}
       <div className="tb-left">
 
-        {/* Tamaño */}
-        <div style={{ display:"flex", flexDirection:"column", alignItems:"center", gap:4 }}>
-          <span className="tb-slider-label">TAM</span>
-          <VSlider value={brushSize} min={1} max={100} onChange={setBrushSize} color="#7070dd"/>
-          <span className="tb-slider-val">{brushSize}</span>
-        </div>
-
+        <VSlider value={brushSize} min={1} max={200}
+          onChange={v => setBrushSize(v)} color="#7070dd" label="TAM"/>
         <div className="tb-sep-h"/>
-
-        {/* Opacidad */}
-        <div style={{ display:"flex", flexDirection:"column", alignItems:"center", gap:4 }}>
-          <span className="tb-slider-label">OPA</span>
-          <VSlider value={Math.round(opacity*100)} min={0} max={100}
-            onChange={v => setOpacity(v/100)} color="#e09a3a"/>
-          <span className="tb-slider-val">{Math.round(opacity*100)}%</span>
-        </div>
+        <VSlider value={Math.round(opacity*100)} min={0} max={100}
+          onChange={v => setOpacity(v/100)} color="#e09a3a" label="OPA"/>
 
       </div>
 
