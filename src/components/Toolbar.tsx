@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import type { BrushType } from "./Canvas";
 
@@ -26,7 +26,6 @@ type Props = {
   copyRoomLink: () => void;
 };
 
-// SVG inline para cada pincel — estilo Paint
 const BRUSH_ICONS: Record<BrushType | "eraser", React.ReactNode> = {
   pen: (
     <svg viewBox="0 0 28 28" width="22" height="22">
@@ -120,16 +119,55 @@ const BRUSHES: { type: BrushType; label: string }[] = [
   { type: "watercolor",  label: "Acuarela"    },
 ];
 
+// Color de avatar determinista por nombre
+function userColor(name: string) {
+  const colors = ["#e05d5d","#e09a3a","#d4c94a","#5dbe6e","#4ab8d4","#7070dd","#c46edd","#dd6eaa"];
+  let hash = 0;
+  for (let i = 0; i < name.length; i++) hash = name.charCodeAt(i) + ((hash << 5) - hash);
+  return colors[Math.abs(hash) % colors.length];
+}
+
+function UserAvatar({ name, size = 28 }: { name: string; size?: number }) {
+  const bg = userColor(name);
+  const initials = name.trim().slice(0, 2).toUpperCase() || "?";
+  return (
+    <div style={{
+      width: size, height: size, borderRadius: "50%",
+      background: bg, color: "#fff",
+      display: "flex", alignItems: "center", justifyContent: "center",
+      fontSize: size * 0.38, fontWeight: "bold", flexShrink: 0,
+      border: "1.5px solid rgba(255,255,255,0.15)",
+    }}>{initials}</div>
+  );
+}
+
 export default function Toolbar({
   color, setColor, brushSize, setBrushSize,
   opacity, setOpacity, eraser, setEraser,
   brushType, setBrushType, bgColor, setBgColor,
   savePNG, users, username, setUsername, room, createRoom, copyRoomLink,
 }: Props) {
-  const [open, setOpen] = useState(false);
-  const [hex,  setHex ] = useState(color);
+  const [open,      setOpen     ] = useState(false);
+  const [hex,       setHex      ] = useState(color);
+  const [editingNick, setEditingNick] = useState(false);
+  const [nickDraft,   setNickDraft  ] = useState(username);
+  const [showUsers,   setShowUsers  ] = useState(false);
+  const nickInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => setHex(color), [color]);
+
+  // Al abrir edición de nick, foco automático
+  useEffect(() => {
+    if (editingNick) nickInputRef.current?.focus();
+  }, [editingNick]);
+
+  const saveNick = () => {
+    const trimmed = nickDraft.trim() || "Invitado";
+    setNickDraft(trimmed);
+    setUsername(trimmed);
+    localStorage.setItem("drawbot-name", trimmed);
+    setEditingNick(false);
+  };
 
   const hexToRgb = (h: string) => {
     const rx = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(h);
@@ -162,16 +200,14 @@ export default function Toolbar({
           display:flex; flex-direction:column; gap:12px;
           box-shadow:0 4px 20px rgba(0,0,0,0.6);
           width:min(92vw,520px); box-sizing:border-box;
+          max-height:90vh; overflow-y:auto;
         }
         .tb-row { display:flex; align-items:center; flex-wrap:wrap; gap:8px; }
         .tb-dh  { width:100%; height:1px; background:#2e2e2e; }
         .tb-dv  { width:1px; height:22px; background:#3a3a3a; flex-shrink:0; }
         .tb-label { color:#888; font-size:12px; min-width:18px; }
-
-        /* ── Cuadrícula de pinceles ── */
         .tb-brushgrid {
-          display:grid;
-          grid-template-columns: repeat(5, 1fr);
+          display:grid; grid-template-columns:repeat(5,1fr);
           gap:5px; width:100%;
         }
         .tb-brushbtn {
@@ -180,14 +216,12 @@ export default function Toolbar({
           border:1px solid #333; background:#252525;
           cursor:pointer; color:#bbb;
           -webkit-tap-highlight-color:transparent; touch-action:manipulation;
-          transition:background .12s, border-color .12s;
-          min-width:0;
+          transition:background .12s, border-color .12s; min-width:0;
         }
         .tb-brushbtn .lbl { font-size:9px; color:#666; text-align:center; line-height:1.2; }
         .tb-brushbtn.active { border-color:#7070dd; background:#2a2a5a; color:#aaaaff; }
         .tb-brushbtn.active .lbl { color:#9999ee; }
         .tb-brushbtn:hover { background:#2e2e2e; }
-
         .tb-icon-btn {
           width:36px; height:36px; border-radius:50%;
           border:0.5px solid #3a3a3a; background:#2a2a2a; color:#aaa;
@@ -204,6 +238,7 @@ export default function Toolbar({
         .tb-num {
           width:46px; background:#2a2a2a; border:0.5px solid #444;
           border-radius:6px; font-size:13px; padding:5px 4px; text-align:center;
+          color:#ccc;
         }
         .tb-slider { width:80px; }
         .tb-text-input {
@@ -227,30 +262,146 @@ export default function Toolbar({
           background-position:0 0,0 4px,4px -4px,-4px 0;
         }
         .tb-bg-inner { position:absolute; inset:0; }
+
+        /* ── Nick ── */
+        .tb-nick-row {
+          display:flex; align-items:center; gap:8px; width:100%;
+        }
+        .tb-nick-display {
+          display:flex; align-items:center; gap:8px; flex:1;
+          background:#252525; border:0.5px solid #333; border-radius:10px;
+          padding:7px 10px; cursor:pointer; min-width:0;
+          transition:border-color .12s;
+        }
+        .tb-nick-display:hover { border-color:#555; }
+        .tb-nick-name {
+          color:#ccc; font-size:14px; flex:1;
+          overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+        }
+        .tb-nick-edit-hint { color:#555; font-size:11px; flex-shrink:0; }
+        .tb-nick-input-row {
+          display:flex; align-items:center; gap:6px; width:100%;
+        }
+
+        /* ── Lista de usuarios ── */
+        .tb-users-btn {
+          display:flex; align-items:center; gap:6px;
+          background:#252525; border:0.5px solid #333; border-radius:10px;
+          padding:6px 10px; cursor:pointer;
+          -webkit-tap-highlight-color:transparent; touch-action:manipulation;
+          transition:border-color .12s;
+        }
+        .tb-users-btn:hover { border-color:#555; }
+        .tb-users-list {
+          width:100%; background:#1a1a1a; border:0.5px solid #2e2e2e;
+          border-radius:10px; overflow:hidden;
+        }
+        .tb-user-item {
+          display:flex; align-items:center; gap:10px;
+          padding:8px 12px; border-bottom:0.5px solid #222;
+        }
+        .tb-user-item:last-child { border-bottom:none; }
+        .tb-user-you {
+          font-size:10px; color:#7070dd; background:#2a2a5a;
+          border-radius:4px; padding:1px 5px; flex-shrink:0;
+        }
+        .tb-avatar-stack {
+          display:flex; flex-direction:row-reverse;
+        }
+        .tb-avatar-stack > div { margin-left:-6px; }
+        .tb-avatar-stack > div:last-child { margin-left:0; }
+
         @media(max-width:480px){
           .tb-slider{width:56px}
           .tb-num{width:38px;font-size:12px}
           .tb-small-btn{font-size:12px;padding:5px 7px}
-          .tb-brushgrid{grid-template-columns:repeat(5,1fr)}
         }
       `}</style>
 
       {/* ── PILL ── */}
       <div className="tb-pill" onClick={() => setOpen(o => !o)}>
-        <div style={{ width:16, height:16, borderRadius:"50%", background:color, border:"1.5px solid #555", flexShrink:0 }} />
+        <UserAvatar name={username} size={20} />
         <span style={{ color:"#aaa", fontSize:14 }}>
           <span style={{ display:"inline-flex", verticalAlign:"middle", marginRight:3 }}>
             {BRUSH_ICONS[eraser ? "eraser" : brushType]}
           </span>
           {activeBrushLabel} · {brushSize}px
         </span>
-        <span style={{ color:"#00ff88", fontSize:13 }}>👥 {users.length}</span>
+        {/* Avatars de usuarios en sala */}
+        <div className="tb-avatar-stack">
+          {users.slice(0, 4).map((u, i) => (
+            <UserAvatar key={i} name={u} size={20} />
+          ))}
+        </div>
+        <span style={{ color:"#00ff88", fontSize:12 }}>{users.length}</span>
         <span style={{ color:"#666", fontSize:13 }}>{open ? "▲" : "▼"}</span>
       </div>
 
       {/* ── PANEL ── */}
       {open && (
         <div className="tb-panel" onClick={e => e.stopPropagation()}>
+
+          {/* ── Tu perfil ── */}
+          <div className="tb-section">Tu perfil</div>
+          {editingNick ? (
+            <div className="tb-nick-input-row">
+              <UserAvatar name={nickDraft || username} size={32} />
+              <input
+                ref={nickInputRef}
+                value={nickDraft}
+                onChange={e => setNickDraft(e.target.value)}
+                onKeyDown={e => { if (e.key === "Enter") saveNick(); if (e.key === "Escape") setEditingNick(false); }}
+                maxLength={24}
+                placeholder="Tu nombre"
+                className="tb-text-input"
+                style={{ flex:1 }}
+              />
+              <button className="tb-small-btn" onClick={saveNick}
+                style={{ background:"#2a5a2a", borderColor:"#3a7a3a", color:"#8f8" }}>
+                ✓
+              </button>
+              <button className="tb-small-btn" onClick={() => setEditingNick(false)}>✕</button>
+            </div>
+          ) : (
+            <div className="tb-nick-row">
+              <div className="tb-nick-display" onClick={() => { setNickDraft(username); setEditingNick(true); }}>
+                <UserAvatar name={username} size={28} />
+                <span className="tb-nick-name">{username}</span>
+                <span className="tb-nick-edit-hint">✏️ editar</span>
+              </div>
+            </div>
+          )}
+
+          <div className="tb-dh"/>
+
+          {/* ── Usuarios en sala ── */}
+          <div className="tb-row" style={{ justifyContent:"space-between" }}>
+            <div className="tb-users-btn" onClick={() => setShowUsers(u => !u)}>
+              <span style={{ color:"#00ff88", fontSize:13 }}>👥</span>
+              <span style={{ color:"#ccc", fontSize:13 }}>{users.length} en sala</span>
+              <span style={{ color:"#555", fontSize:12 }}>{showUsers ? "▲" : "▼"}</span>
+            </div>
+          </div>
+
+          {showUsers && (
+            <div className="tb-users-list">
+              {users.length === 0 ? (
+                <div className="tb-user-item">
+                  <span style={{ color:"#555", fontSize:13 }}>Sin usuarios</span>
+                </div>
+              ) : (
+                users.map((u, i) => (
+                  <div key={i} className="tb-user-item">
+                    <UserAvatar name={u} size={28} />
+                    <span style={{ color:"#ccc", fontSize:13, flex:1 }}>{u}</span>
+                    {u === username && <span className="tb-user-you">tú</span>}
+                  </div>
+                ))
+              )}
+            </div>
+          )}
+
+          <div className="tb-dh"/>
 
           {/* Color de pincel */}
           <div className="tb-row">
@@ -291,8 +442,7 @@ export default function Toolbar({
                 <span className="lbl">{b.label}</span>
               </div>
             ))}
-            <div className={`tb-brushbtn${eraser ? " active" : ""}`}
-              onClick={() => setEraser(true)}>
+            <div className={`tb-brushbtn${eraser ? " active" : ""}`} onClick={() => setEraser(true)}>
               {BRUSH_ICONS.eraser}
               <span className="lbl">Borrar</span>
             </div>
@@ -333,16 +483,6 @@ export default function Toolbar({
             <span style={{ color:"#ccc", fontSize:13, fontFamily:"monospace" }}>{room}</span>
             <button className="tb-small-btn" onClick={createRoom}>➕ Nueva</button>
             <button className="tb-small-btn" onClick={copyRoomLink}>🔗 Copiar</button>
-          </div>
-
-          {/* Usuario + online */}
-          <div className="tb-row">
-            <input value={username}
-              onChange={e => { setUsername(e.target.value); localStorage.setItem("drawbot-name", e.target.value); }}
-              placeholder="Tu nombre" className="tb-text-input" />
-            <span style={{ color:"#00ff88", fontSize:14, fontWeight:"bold", whiteSpace:"nowrap" }}>
-              👥 {users.length} online
-            </span>
           </div>
 
         </div>
