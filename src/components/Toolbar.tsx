@@ -167,6 +167,7 @@ export default function Toolbar({
     setUsername(trimmed);
     localStorage.setItem("drawbot-name", trimmed);
     setEditingNick(false);
+    window.location.reload();
   };
 
   const hexToRgb = (h: string) => {
@@ -490,4 +491,3 @@ export default function Toolbar({
     </>
   );
 }
-
