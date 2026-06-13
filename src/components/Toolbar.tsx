@@ -89,15 +89,6 @@ const BRUSH_ICONS: Record<BrushType | "eraser", React.ReactNode> = {
       <rect x="13" y="3" width="1.5" height="12" rx="0.75" fill="white" opacity="0.18"/>
     </svg>
   ),
-  watercolor: (
-    <svg viewBox="0 0 28 28" width="22" height="22">
-      <ellipse cx="14" cy="17" rx="9" ry="7" fill="currentColor" opacity="0.18"/>
-      <ellipse cx="14" cy="16" rx="7" ry="5" fill="currentColor" opacity="0.22"/>
-      <ellipse cx="14" cy="15" rx="5" ry="4" fill="currentColor" opacity="0.3"/>
-      <path d="M13 3 Q15 8 14 14 Q13 8 11 3 Z" fill="currentColor" opacity="0.7"/>
-      <rect x="13" y="1" width="2" height="3" rx="1" fill="#aaa"/>
-    </svg>
-  ),
   eraser: (
     <svg viewBox="0 0 28 28" width="22" height="22">
       <rect x="5" y="12" width="18" height="10" rx="2" fill="#e8e0d8" opacity="0.9"/>
@@ -116,7 +107,6 @@ const BRUSHES: { type: BrushType; label: string }[] = [
   { type: "crayon",      label: "Crayón"      },
   { type: "marker",      label: "Rotulador"   },
   { type: "pencil",      label: "Lápiz"       },
-  { type: "watercolor",  label: "Acuarela"    },
 ];
 
 // Color de avatar determinista por nombre

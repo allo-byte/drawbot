@@ -10,8 +10,7 @@ export type BrushType =
   | "oil"
   | "crayon"
   | "marker"
-  | "pencil"
-  | "watercolor";
+  | "pencil";
 
 type Stroke = {
   points: Point[];
@@ -52,21 +51,24 @@ function prng(seed: number) {
   return (s >>> 0) / 0xffffffff;
 }
 
+// Tamaño fijo del offscreen — coordenadas mundo
+// Usamos un canvas grande en espacio mundo, sin DPR ni view transform
+const WORLD_W = 4096;
+const WORLD_H = 4096;
+
 export default function Canvas({
   color, brushSize, opacity, eraser, brushType, username,
   bgColor, setUsers, onReady, onBgColor,
 }: Props) {
-  const canvasRef        = useRef<HTMLCanvasElement>(null);
-  const offscreenRef     = useRef<HTMLCanvasElement | null>(null);
-  const wsRef            = useRef<WebSocket | null>(null);
-  const cursorsRef       = useRef<Map<string, Cursor>>(new Map());
-  const strokesRef       = useRef<Stroke[]>([]);
-  const currentStrokeRef = useRef<Stroke | null>(null);
+  const canvasRef         = useRef<HTMLCanvasElement>(null);
+  // offscreen en coordenadas MUNDO (sin zoom ni pan)
+  const offscreenRef      = useRef<HTMLCanvasElement | null>(null);
+  const wsRef             = useRef<WebSocket | null>(null);
+  const cursorsRef        = useRef<Map<string, Cursor>>(new Map());
+  const strokesRef        = useRef<Stroke[]>([]);
+  const currentStrokeRef  = useRef<Stroke | null>(null);
   const offscreenCountRef = useRef(0);
-
-  // RAF: pendiente de dibujar
-  const rafRef           = useRef<number | null>(null);
-  const dirtyRef         = useRef(false);
+  const rafRef            = useRef<number | null>(null);
 
   const colorRef     = useRef(color);
   const sizeRef      = useRef(brushSize);
@@ -84,21 +86,16 @@ export default function Canvas({
   brushTypeRef.current = brushType;
   bgColorRef.current   = bgColor;
 
-  const MIN_SCALE = 0.25;
-  const MAX_SCALE = 8;
+  const MIN_SCALE = 0.1;
+  const MAX_SCALE = 10;
 
   const toWorld = (sx: number, sy: number) => {
     const v = viewRef.current;
     return { x: (sx - v.x) / v.scale, y: (sy - v.y) / v.scale };
   };
 
-  // ─── Motor de pinceles ────────────────────────────────────────────────────
-  // Dibuja SOLO los puntos desde `fromIndex` en adelante (incremental)
-  const drawStrokeFrom = (
-    ctx: CanvasRenderingContext2D,
-    stroke: Stroke,
-    fromIndex: number
-  ) => {
+  // ─── Motor de pinceles — dibuja en coordenadas MUNDO ─────────────────────
+  const drawStrokeFrom = (ctx: CanvasRenderingContext2D, stroke: Stroke, fromIndex: number) => {
     const pts = stroke.points;
     if (pts.length < 1) return;
     const bt = stroke.brushType ?? "pen";
@@ -106,6 +103,14 @@ export default function Canvas({
     const sz  = stroke.size;
     const { r, g, b } = hexRgb(col);
     const erasing = stroke.eraser;
+    const start = Math.max(fromIndex === 0 ? 0 : fromIndex - 1, 0);
+
+    const makeStamp = (dim: number, paint: (sc: CanvasRenderingContext2D) => void) => {
+      const s = document.createElement("canvas");
+      s.width = s.height = dim;
+      paint(s.getContext("2d")!);
+      return s;
+    };
 
     ctx.save();
     if (erasing) {
@@ -114,17 +119,6 @@ export default function Canvas({
     } else {
       ctx.globalCompositeOperation = "source-over";
     }
-
-    // Para pinceles de línea: necesitamos un punto anterior para conectar
-    const start = Math.max(fromIndex === 0 ? 0 : fromIndex - 1, 0);
-
-    // ── Helper stamp ─────────────────────────────────────────────────────────
-    const makeStamp = (dim: number, paint: (sc: CanvasRenderingContext2D) => void) => {
-      const s = document.createElement("canvas");
-      s.width = s.height = dim;
-      paint(s.getContext("2d")!);
-      return s;
-    };
 
     if (bt === "pen") {
       if (pts.length < 2) { ctx.restore(); return; }
@@ -157,7 +151,6 @@ export default function Canvas({
       }
 
     } else if (bt === "airbrush") {
-      // Stamp: disco de puntos pre-renderizado, luego drawImage rotado por punto
       const density = Math.max(8, Math.floor(sz * 2));
       const radius  = sz * 1.8;
       const dim = Math.ceil(radius * 2) + 4;
@@ -234,12 +227,12 @@ export default function Canvas({
 
     } else if (bt === "marker") {
       if (pts.length < 2) { ctx.restore(); return; }
-      ctx.globalAlpha = Math.min(1, stroke.opacity*1.1);
+      ctx.globalAlpha = Math.min(1, stroke.opacity * 1.1);
       ctx.strokeStyle = erasing ? "#000" : col;
-      ctx.lineWidth = sz; ctx.lineCap="square"; ctx.lineJoin="miter";
+      ctx.lineWidth = sz; ctx.lineCap = "square"; ctx.lineJoin = "miter";
       ctx.beginPath();
       ctx.moveTo(pts[start].x, pts[start].y);
-      for (let i=start+1; i<pts.length; i++)
+      for (let i = start + 1; i < pts.length; i++)
         ctx.lineTo(pts[i].x, pts[i].y);
       ctx.stroke();
 
@@ -259,125 +252,60 @@ export default function Canvas({
           ctx.lineTo(pts[i].x + offX, pts[i].y + offY);
         ctx.stroke();
       }
-
-    } else if (bt === "watercolor") {
-      // Stamp pre-renderizado: un solo gradiente radial en canvas pequeño,
-      // luego drawImage por cada punto → sin createRadialGradient en el loop
-      const passes = [
-        { spread: sz * 0.9,  alpha: stroke.opacity * 0.13 },
-        { spread: sz * 1.15, alpha: stroke.opacity * 0.09 },
-        { spread: sz * 1.45, alpha: stroke.opacity * 0.06 },
-      ];
-
-      for (let pi = 0; pi < passes.length; pi++) {
-        const { spread, alpha } = passes[pi];
-        const dim = Math.ceil(spread * 2) + 2;
-
-        // Crear stamp una sola vez por pass
-        const stamp = document.createElement("canvas");
-        stamp.width = stamp.height = dim;
-        const sc = stamp.getContext("2d")!;
-        const cx = dim / 2, cy = dim / 2;
-        const grad = sc.createRadialGradient(cx, cy, 0, cx, cy, spread);
-        if (erasing) {
-          grad.addColorStop(0,   "rgba(0,0,0,0.9)");
-          grad.addColorStop(0.5, "rgba(0,0,0,0.3)");
-          grad.addColorStop(1,   "rgba(0,0,0,0)");
-        } else {
-          grad.addColorStop(0,   `rgba(${r},${g},${b},1)`);
-          grad.addColorStop(0.45,`rgba(${r},${g},${b},0.35)`);
-          grad.addColorStop(1,   `rgba(${r},${g},${b},0)`);
-        }
-        sc.fillStyle = grad;
-        sc.fillRect(0, 0, dim, dim);
-
-        ctx.globalAlpha = alpha;
-        for (let p = start; p < pts.length; p++) {
-          const pt = pts[p];
-          // Pequeño jitter reproducible para efecto aguado
-          const jx = (prng(pi*9901 + p*7)  - 0.5) * sz * 0.28;
-          const jy = (prng(pi*8803 + p*11) - 0.5) * sz * 0.28;
-          ctx.drawImage(stamp, pt.x + jx - cx, pt.y + jy - cy);
-        }
-      }
     }
     ctx.restore();
   };
 
-  // Dibujo completo del stroke (para flush a offscreen)
   const drawStroke = (ctx: CanvasRenderingContext2D, stroke: Stroke) =>
     drawStrokeFrom(ctx, stroke, 0);
 
-  // ─── Offscreen ────────────────────────────────────────────────────────────
-  const getOffCtx = () => {
-    const off = offscreenRef.current;
-    if (!off) return null;
-    return off.getContext("2d");
-  };
-
-  const offTransform = (ctx: CanvasRenderingContext2D) => {
-    const dpr = window.devicePixelRatio || 1;
-    const v = viewRef.current;
-    ctx.scale(dpr, dpr);
-    ctx.translate(v.x, v.y);
-    ctx.scale(v.scale, v.scale);
-  };
-
+  // ─── Offscreen en coordenadas MUNDO (sin transform de view) ──────────────
   const flushToOffscreen = () => {
-    const ctx = getOffCtx(); if (!ctx) return;
+    const off = offscreenRef.current; if (!off) return;
+    const ctx = off.getContext("2d"); if (!ctx) return;
     const strokes = strokesRef.current;
-    ctx.save(); offTransform(ctx);
+    // Sin ninguna transformación — coordenadas mundo directas
     for (let i = offscreenCountRef.current; i < strokes.length; i++)
       drawStroke(ctx, strokes[i]);
     offscreenCountRef.current = strokes.length;
-    ctx.restore();
   };
 
   const rebuildOffscreen = () => {
     const off = offscreenRef.current; if (!off) return;
     const ctx = off.getContext("2d"); if (!ctx) return;
-    ctx.save();
     ctx.setTransform(1,0,0,1,0,0);
     ctx.clearRect(0, 0, off.width, off.height);
     ctx.fillStyle = bgColorRef.current;
     ctx.fillRect(0, 0, off.width, off.height);
-    ctx.restore();
-    ctx.save(); offTransform(ctx);
     strokesRef.current.forEach(s => drawStroke(ctx, s));
-    ctx.restore();
     offscreenCountRef.current = strokesRef.current.length;
   };
 
-  // ─── Composite (display) — se llama solo desde RAF ────────────────────────
+  // ─── Composite: transforma el offscreen mundo → pantalla con drawImage ───
+  // El zoom es GRATIS porque solo cambia el drawImage, no redibuja strokes
   const compositeNow = () => {
     const canvas = canvasRef.current;
     const off = offscreenRef.current;
     if (!canvas || !off) return;
     const ctx = canvas.getContext("2d"); if (!ctx) return;
+    const dpr = window.devicePixelRatio || 1;
+    const v = viewRef.current;
 
-    ctx.save();
     ctx.setTransform(1,0,0,1,0,0);
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.drawImage(off, 0, 0);
-    ctx.restore();
 
-    if (currentStrokeRef.current) {
-      const dpr = window.devicePixelRatio || 1;
-      const v = viewRef.current;
-      ctx.save();
-      ctx.scale(dpr, dpr);
-      ctx.translate(v.x, v.y);
-      ctx.scale(v.scale, v.scale);
-      drawStroke(ctx, currentStrokeRef.current);
-      ctx.restore();
-    }
-
-    const v = viewRef.current;
-    const dpr = window.devicePixelRatio || 1;
+    // Dibujar offscreen mundo con transformación view aplicada
     ctx.save();
     ctx.scale(dpr, dpr);
     ctx.translate(v.x, v.y);
     ctx.scale(v.scale, v.scale);
+    ctx.drawImage(off, 0, 0);
+
+    // Stroke activo encima
+    if (currentStrokeRef.current)
+      drawStroke(ctx, currentStrokeRef.current);
+
+    // Cursores
     cursorsRef.current.forEach((cursor) => {
       ctx.beginPath();
       ctx.fillStyle = "#00ff88";
@@ -389,20 +317,20 @@ export default function Canvas({
     });
     ctx.restore();
 
-    dirtyRef.current = false;
     rafRef.current = null;
   };
 
-  // Solicitar un frame — coalesce múltiples eventos en uno solo
   const requestFrame = () => {
-    if (rafRef.current !== null) return; // ya hay uno pendiente
-    dirtyRef.current = true;
+    if (rafRef.current !== null) return;
     rafRef.current = requestAnimationFrame(compositeNow);
   };
 
-  const redraw = () => { rebuildOffscreen(); requestFrame(); };
+  // zoom/bgColor → solo requestFrame, NO rebuild (el zoom es gratis ahora)
+  const redraw = () => { requestFrame(); };
+  // solo bgColor necesita rebuild
+  const redrawFull = () => { rebuildOffscreen(); requestFrame(); };
 
-  useEffect(() => { redraw(); }, [bgColor]);
+  useEffect(() => { redrawFull(); }, [bgColor]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -415,12 +343,13 @@ export default function Canvas({
     canvas.style.width  = window.innerWidth  + "px";
     canvas.style.height = window.innerHeight + "px";
 
+    // Offscreen en coordenadas mundo — tamaño fijo grande
     const off = document.createElement("canvas");
-    off.width = W; off.height = H;
+    off.width = WORLD_W; off.height = WORLD_H;
     offscreenRef.current = off;
     const offCtx = off.getContext("2d")!;
     offCtx.fillStyle = bgColorRef.current;
-    offCtx.fillRect(0, 0, W, H);
+    offCtx.fillRect(0, 0, WORLD_W, WORLD_H);
 
     const room = new URLSearchParams(window.location.search).get("room") || "default";
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
@@ -437,21 +366,19 @@ export default function Canvas({
         strokesRef.current = data.strokes || [];
         offscreenCountRef.current = 0;
         if (data.bgColor) onBgColor?.(data.bgColor);
-        redraw(); return;
+        redrawFull(); return;
       }
       if (data.type === "users")  { setUsers?.(data.users||[]); return; }
       if (data.type === "stroke") {
         strokesRef.current.push(data.stroke);
         flushToOffscreen();
-        requestFrame();
-        return;
+        requestFrame(); return;
       }
       if (data.type === "clear") {
         strokesRef.current = [];
         offscreenCountRef.current = 0;
         rebuildOffscreen();
-        requestFrame();
-        return;
+        requestFrame(); return;
       }
       if (data.type === "bgcolor") { onBgColor?.(data.color); return; }
       if (data.type === "cursor") {
@@ -484,7 +411,7 @@ export default function Canvas({
       if (e.pointerType==="pen"||e.pointerType==="mouse") { startStroke(pos); return; }
       touchPointersRef.current.set(e.pointerId, pos);
       if (touchPointersRef.current.size===2) {
-        currentStrokeRef.current=null;
+        currentStrokeRef.current = null;
         const info=getPinchInfo(); lastPinchDist=info.dist; lastPinchMid=info.mid; return;
       }
       if (touchPointersRef.current.size===1) startStroke(pos);
@@ -500,7 +427,7 @@ export default function Canvas({
         if (wsRef.current?.readyState===WebSocket.OPEN)
           wsRef.current.send(JSON.stringify({type:"cursor",x:world.x,y:world.y}));
         currentStrokeRef.current.points.push(world);
-        requestFrame(); // ← solo pide frame, no dibuja ahora
+        requestFrame();
         return;
       }
 
@@ -516,7 +443,8 @@ export default function Canvas({
           scale:ns,
         };
         lastPinchDist=info.dist; lastPinchMid=info.mid;
-        redraw(); return;
+        redraw(); // ← solo requestFrame, no rebuild
+        return;
       }
 
       if (!currentStrokeRef.current) return;
@@ -552,7 +480,7 @@ export default function Canvas({
       const delta=e.deltaY<0?1.12:0.9;
       const ns=Math.min(MAX_SCALE,Math.max(MIN_SCALE,v.scale*delta));
       viewRef.current={ x:mx-(mx-v.x)*(ns/v.scale), y:my-(my-v.y)*(ns/v.scale), scale:ns };
-      redraw();
+      redraw(); // ← solo requestFrame, INSTANTÁNEO
     };
 
     canvas.addEventListener("pointerdown",   onPointerDown);
@@ -562,15 +490,11 @@ export default function Canvas({
     canvas.addEventListener("wheel", onWheel, { passive:false });
 
     const savePNG = () => {
-      const saved={...viewRef.current};
-      viewRef.current={x:0,y:0,scale:1};
-      rebuildOffscreen();
+      // Exportar en coordenadas mundo al tamaño natural
       const link=document.createElement("a");
       link.download=`drawbot-${Date.now()}.png`;
       link.href=(offscreenRef.current as HTMLCanvasElement).toDataURL("image/png");
       link.click();
-      viewRef.current=saved;
-      redraw();
     };
     onReady?.(savePNG);
 
