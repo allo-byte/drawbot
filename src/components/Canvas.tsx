@@ -337,11 +337,11 @@ export default function Canvas({
     if (!canvas) return;
 
     const dpr = window.devicePixelRatio || 1;
-    const W = window.innerWidth * dpr;
-    const H = window.innerHeight * dpr;
+    const W = (window.innerWidth - 52) * dpr;
+    const H = (window.innerHeight - 52) * dpr;
     canvas.width = W; canvas.height = H;
-    canvas.style.width  = window.innerWidth  + "px";
-    canvas.style.height = window.innerHeight + "px";
+    canvas.style.width  = (window.innerWidth - 52) + "px";
+    canvas.style.height = (window.innerHeight - 52) + "px";
 
     // Offscreen en coordenadas mundo — tamaño fijo grande
     const off = document.createElement("canvas");
@@ -518,7 +518,11 @@ export default function Canvas({
     <canvas
       ref={canvasRef}
       style={{
-        width:"100vw", height:"100vh", display:"block",
+        position:"fixed",
+        top:52, left:52,
+        width:"calc(100vw - 52px)",
+        height:"calc(100vh - 52px)",
+        display:"block",
         touchAction:"none", WebkitUserSelect:"none", userSelect:"none",
         // @ts-ignore
         WebkitTouchCallout:"none",

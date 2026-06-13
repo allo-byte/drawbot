@@ -133,22 +133,37 @@ function VSlider({ value, min, max, onChange, color = "#7070dd" }: {
   value: number; min: number; max: number;
   onChange: (v: number) => void; color?: string;
 }) {
+  const pct = ((value - min) / (max - min)) * 100;
+  const trackH = 200;
   return (
-    <div style={{ position: "relative", width: 36, height: 160, display: "flex", alignItems: "center", justifyContent: "center" }}>
-      <input
-        type="range" min={min} max={max} value={value}
-        onChange={e => onChange(Number(e.target.value))}
-        style={{
-          writingMode: "vertical-lr" as any,
-          direction: "rtl" as any,
-          width: 160, height: 36,
-          transform: "rotate(180deg)",
-          WebkitAppearance: "slider-vertical",
-          appearance: "slider-vertical" as any,
-          accentColor: color,
-          cursor: "pointer",
-        }}
-      />
+    <div style={{ position:"relative", width:28, height:trackH, display:"flex",
+      alignItems:"center", justifyContent:"center", cursor:"pointer" }}
+      onPointerDown={e => {
+        const el = e.currentTarget;
+        const move = (ev: PointerEvent) => {
+          const rect = el.getBoundingClientRect();
+          const t = 1 - Math.max(0, Math.min(1, (ev.clientY - rect.top) / rect.height));
+          onChange(Math.round(min + t * (max - min)));
+        };
+        const up = () => { window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up); };
+        window.addEventListener("pointermove", move);
+        window.addEventListener("pointerup", up);
+        move(e.nativeEvent as PointerEvent);
+      }}>
+      {/* Track */}
+      <div style={{ position:"absolute", left:"50%", top:0, bottom:0,
+        width:4, transform:"translateX(-50%)", borderRadius:2,
+        background:"#2a2a2a" }}/>
+      {/* Fill */}
+      <div style={{ position:"absolute", left:"50%", bottom:0,
+        width:4, transform:"translateX(-50%)", borderRadius:2,
+        height:`${pct}%`, background:color, transition:"height .05s" }}/>
+      {/* Thumb */}
+      <div style={{ position:"absolute", left:"50%", transform:"translateX(-50%)",
+        top:`${100 - pct}%`, marginTop:-10,
+        width:20, height:20, borderRadius:"50%",
+        background:"#fff", border:`2px solid ${color}`,
+        boxShadow:"0 2px 6px rgba(0,0,0,0.5)" }}/>
     </div>
   );
 }
@@ -271,7 +286,7 @@ export default function Toolbar({
         /* Panel color — aparece bajo el swatch */
         .tb-panel-color {
           top: 60px; left: 60px;
-          width: 260px;
+          width: 300px;
         }
 
         /* Panel usuarios */
@@ -516,16 +531,27 @@ export default function Toolbar({
                   cursor:"pointer", padding:0, borderRadius:10 }} />
             </div>
 
-            {/* Hex + RGB */}
-            <div style={{ display:"flex", alignItems:"center", gap:6, marginBottom:10 }}>
+            {/* Hex */}
+            <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:8 }}>
+              <span style={{ color:"#555", fontSize:11 }}>HEX</span>
               <input value={hex}
                 onChange={e => { setHex(e.target.value); if(/^#[0-9A-Fa-f]{6}$/.test(e.target.value)) setColor(e.target.value); }}
-                className="tb-hex" />
+                style={{ flex:1, background:"#1a1a1a", border:"0.5px solid #333",
+                  borderRadius:6, color:"#ccc", fontSize:13, padding:"5px 8px" }} />
+            </div>
+            {/* RGB */}
+            <div style={{ display:"flex", gap:6, marginBottom:10 }}>
               {(["r","g","b"] as const).map((ch,i) => (
-                <input key={ch} type="number" min={0} max={255} value={rgb[ch]}
-                  onChange={e => updateRGB(ch, Number(e.target.value))}
-                  className="tb-num"
-                  style={{ color: ["#f88","#8f8","#88f"][i] }} />
+                <div key={ch} style={{ flex:1, display:"flex", flexDirection:"column", gap:3 }}>
+                  <span style={{ color:["#f88","#8f8","#88f"][i], fontSize:10, textAlign:"center" }}>
+                    {ch.toUpperCase()}
+                  </span>
+                  <input type="number" min={0} max={255} value={rgb[ch]}
+                    onChange={e => updateRGB(ch, Number(e.target.value))}
+                    style={{ width:"100%", background:"#1a1a1a", border:`0.5px solid ${["#f88","#8f8","#88f"][i]}40`,
+                      borderRadius:6, color:["#f88","#8f8","#88f"][i], fontSize:13,
+                      padding:"5px 4px", textAlign:"center" }} />
+                </div>
               ))}
             </div>
 
