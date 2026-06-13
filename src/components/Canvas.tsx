@@ -118,6 +118,14 @@ export default function Canvas({
     // Para pinceles de línea: necesitamos un punto anterior para conectar
     const start = Math.max(fromIndex === 0 ? 0 : fromIndex - 1, 0);
 
+    // ── Helper stamp ─────────────────────────────────────────────────────────
+    const makeStamp = (dim: number, paint: (sc: CanvasRenderingContext2D) => void) => {
+      const s = document.createElement("canvas");
+      s.width = s.height = dim;
+      paint(s.getContext("2d")!);
+      return s;
+    };
+
     if (bt === "pen") {
       if (pts.length < 2) { ctx.restore(); return; }
       ctx.globalAlpha = stroke.opacity;
@@ -130,71 +138,75 @@ export default function Canvas({
         ctx.lineTo(pts[i].x, pts[i].y);
       ctx.stroke();
 
-    } else if (bt === "caligraphy1") {
+    } else if (bt === "caligraphy1" || bt === "caligraphy2") {
       if (pts.length < 2) { ctx.restore(); return; }
       ctx.globalAlpha = stroke.opacity;
+      const angle = bt === "caligraphy1" ? Math.PI * 0.75 : Math.PI * 0.25;
       const w = sz, h = Math.max(1, sz * 0.18);
+      const dim = Math.ceil(Math.sqrt(w*w + h*h)) + 4;
+      const half = dim / 2;
+      const stamp = makeStamp(dim, sc => {
+        sc.fillStyle = erasing ? "#000" : col;
+        sc.translate(half, half);
+        sc.rotate(angle);
+        sc.fillRect(-w/2, -h/2, w, h);
+      });
       for (let i = Math.max(start, 1); i < pts.length; i++) {
         const a = pts[i-1], bPt = pts[i];
-        ctx.save();
-        ctx.translate((a.x+bPt.x)/2, (a.y+bPt.y)/2);
-        ctx.rotate(Math.PI * 0.75);
-        ctx.fillStyle = erasing ? "#000" : col;
-        ctx.fillRect(-w/2, -h/2, w, h);
-        ctx.restore();
-      }
-
-    } else if (bt === "caligraphy2") {
-      if (pts.length < 2) { ctx.restore(); return; }
-      ctx.globalAlpha = stroke.opacity;
-      const w = sz, h = Math.max(1, sz * 0.18);
-      for (let i = Math.max(start, 1); i < pts.length; i++) {
-        const a = pts[i-1], bPt = pts[i];
-        ctx.save();
-        ctx.translate((a.x+bPt.x)/2, (a.y+bPt.y)/2);
-        ctx.rotate(Math.PI * 0.25);
-        ctx.fillStyle = erasing ? "#000" : col;
-        ctx.fillRect(-w/2, -h/2, w, h);
-        ctx.restore();
+        ctx.drawImage(stamp, (a.x+bPt.x)/2 - half, (a.y+bPt.y)/2 - half);
       }
 
     } else if (bt === "airbrush") {
+      // Stamp: disco de puntos pre-renderizado, luego drawImage rotado por punto
       const density = Math.max(8, Math.floor(sz * 2));
       const radius  = sz * 1.8;
-      ctx.fillStyle = erasing ? "#000" : `rgba(${r},${g},${b},${stroke.opacity * 0.22})`;
+      const dim = Math.ceil(radius * 2) + 4;
+      const half = dim / 2;
+      const stamp = makeStamp(dim, sc => {
+        sc.fillStyle = erasing ? `rgba(0,0,0,${stroke.opacity * 0.22})`
+                                : `rgba(${r},${g},${b},${stroke.opacity * 0.22})`;
+        for (let i = 0; i < density; i++) {
+          const ang = prng(i*6271) * Math.PI * 2;
+          const rad = Math.sqrt(prng(i*7919)) * radius;
+          sc.beginPath();
+          sc.arc(half + Math.cos(ang)*rad, half + Math.sin(ang)*rad, 0.7, 0, Math.PI*2);
+          sc.fill();
+        }
+      });
       for (let p = start; p < pts.length; p++) {
         const pt = pts[p];
-        for (let i = 0; i < density; i++) {
-          const ang = prng(p*9973+i*6271) * Math.PI * 2;
-          const rad = Math.sqrt(prng(p*1009+i*7919)) * radius;
-          ctx.beginPath();
-          ctx.arc(pt.x + Math.cos(ang)*rad, pt.y + Math.sin(ang)*rad, 0.7, 0, Math.PI*2);
-          ctx.fill();
-        }
+        const ang = prng(p * 9973) * Math.PI * 2;
+        ctx.save();
+        ctx.translate(pt.x, pt.y);
+        ctx.rotate(ang);
+        ctx.drawImage(stamp, -half, -half);
+        ctx.restore();
       }
 
     } else if (bt === "oil") {
       if (pts.length < 2) { ctx.restore(); return; }
       const bristles = Math.max(4, Math.floor(sz * 0.6));
+      ctx.lineCap = "round"; ctx.lineJoin = "round";
+      ctx.lineWidth = Math.max(0.8, sz * 0.12);
       for (let b2 = 0; b2 < bristles; b2++) {
         ctx.globalAlpha = stroke.opacity * (0.55 + prng(b2*3571)*0.45);
-        ctx.strokeStyle = erasing ? "#000"
-          : `rgba(${Math.min(255,r+Math.floor(prng(b2*13)*30-15))},${Math.min(255,g+Math.floor(prng(b2*17)*30-15))},${Math.min(255,b+Math.floor(prng(b2*19)*30-15))},1)`;
-        ctx.lineWidth = Math.max(0.8, sz*0.12);
-        ctx.lineCap = "round"; ctx.lineJoin = "round";
+        const dr = Math.min(255, r + Math.floor(prng(b2*13)*30 - 15));
+        const dg = Math.min(255, g + Math.floor(prng(b2*17)*30 - 15));
+        const db2 = Math.min(255, b + Math.floor(prng(b2*19)*30 - 15));
+        ctx.strokeStyle = erasing ? "#000" : `rgb(${dr},${dg},${db2})`;
+        const t = bristles > 1 ? b2/(bristles-1) - 0.5 : 0;
         ctx.beginPath();
         let moved = false;
         for (let i = start; i < pts.length; i++) {
           const pt = pts[i];
-          let dx=0, dy=1;
+          let dx = 0, dy = 1;
           if (i > 0) {
-            dx = pt.x-pts[i-1].x; dy = pt.y-pts[i-1].y;
-            const len = Math.sqrt(dx*dx+dy*dy)||1; dx/=len; dy/=len;
+            dx = pt.x - pts[i-1].x; dy = pt.y - pts[i-1].y;
+            const len = Math.sqrt(dx*dx + dy*dy) || 1; dx /= len; dy /= len;
           }
-          const t = bristles > 1 ? b2/(bristles-1)-0.5 : 0;
           const px = -dy*t*sz + prng(b2*1009+i*503)*sz*0.06;
           const py =  dx*t*sz + prng(b2*2003+i*701)*sz*0.06;
-          if (!moved) { ctx.moveTo(pt.x+px, pt.y+py); moved=true; }
+          if (!moved) { ctx.moveTo(pt.x+px, pt.y+py); moved = true; }
           else          ctx.lineTo(pt.x+px, pt.y+py);
         }
         ctx.stroke();
@@ -202,20 +214,20 @@ export default function Canvas({
 
     } else if (bt === "crayon") {
       if (pts.length < 2) { ctx.restore(); return; }
-      const grain = Math.max(3, Math.floor(sz*0.5));
-      for (let g2=0; g2<grain; g2++) {
-        const offX = (prng(g2*4001)-0.5)*sz*0.85;
-        const offY = (prng(g2*5003)-0.5)*sz*0.85;
-        ctx.globalAlpha = (0.12+prng(g2*7001)*0.3)*stroke.opacity;
+      const grain = Math.max(3, Math.floor(sz * 0.5));
+      ctx.lineCap = "round"; ctx.lineJoin = "round";
+      for (let g2 = 0; g2 < grain; g2++) {
+        const offX = (prng(g2*4001) - 0.5) * sz * 0.85;
+        const offY = (prng(g2*5003) - 0.5) * sz * 0.85;
+        ctx.globalAlpha = (0.12 + prng(g2*7001)*0.3) * stroke.opacity;
         ctx.strokeStyle = erasing ? "#000" : col;
-        ctx.lineWidth = Math.max(0.4, sz*0.08+prng(g2*3007)*sz*0.07);
-        ctx.lineCap="round"; ctx.lineJoin="round";
+        ctx.lineWidth = Math.max(0.4, sz*0.08 + prng(g2*3007)*sz*0.07);
         ctx.beginPath();
-        ctx.moveTo(pts[start].x+offX, pts[start].y+offY);
-        for (let i=start+1; i<pts.length; i++) {
-          const jx = offX+(prng(g2*1009+i*503)-0.5)*sz*0.12;
-          const jy = offY+(prng(g2*2003+i*701)-0.5)*sz*0.12;
-          ctx.lineTo(pts[i].x+jx, pts[i].y+jy);
+        ctx.moveTo(pts[start].x + offX, pts[start].y + offY);
+        for (let i = start + 1; i < pts.length; i++) {
+          const jx = offX + (prng(g2*1009+i*503) - 0.5) * sz * 0.12;
+          const jy = offY + (prng(g2*2003+i*701) - 0.5) * sz * 0.12;
+          ctx.lineTo(pts[i].x + jx, pts[i].y + jy);
         }
         ctx.stroke();
       }
@@ -233,45 +245,59 @@ export default function Canvas({
 
     } else if (bt === "pencil") {
       if (pts.length < 2) { ctx.restore(); return; }
-      const lines = Math.max(2, Math.floor(sz*0.4));
-      for (let l=0; l<lines; l++) {
-        const offX = (prng(l*2017)-0.5)*sz*0.65;
-        const offY = (prng(l*3019)-0.5)*sz*0.65;
-        ctx.globalAlpha = (0.07+prng(l*9001)*0.15)*stroke.opacity;
+      const lines = Math.max(2, Math.floor(sz * 0.4));
+      ctx.lineCap = "round";
+      for (let l = 0; l < lines; l++) {
+        const offX = (prng(l*2017) - 0.5) * sz * 0.65;
+        const offY = (prng(l*3019) - 0.5) * sz * 0.65;
+        ctx.globalAlpha = (0.07 + prng(l*9001)*0.15) * stroke.opacity;
         ctx.strokeStyle = erasing ? "#000" : col;
-        ctx.lineWidth = 0.4+prng(l*4001)*0.5;
-        ctx.lineCap="round";
+        ctx.lineWidth = 0.4 + prng(l*4001) * 0.5;
         ctx.beginPath();
-        ctx.moveTo(pts[start].x+offX, pts[start].y+offY);
-        for (let i=start+1; i<pts.length; i++)
-          ctx.lineTo(pts[i].x+offX, pts[i].y+offY);
+        ctx.moveTo(pts[start].x + offX, pts[start].y + offY);
+        for (let i = start + 1; i < pts.length; i++)
+          ctx.lineTo(pts[i].x + offX, pts[i].y + offY);
         ctx.stroke();
       }
 
     } else if (bt === "watercolor") {
-      for (let pass=0; pass<3; pass++) {
-        ctx.globalAlpha = stroke.opacity * 0.1;
-        for (let p=start; p<pts.length; p++) {
+      // Stamp pre-renderizado: un solo gradiente radial en canvas pequeño,
+      // luego drawImage por cada punto → sin createRadialGradient en el loop
+      const passes = [
+        { spread: sz * 0.9,  alpha: stroke.opacity * 0.13 },
+        { spread: sz * 1.15, alpha: stroke.opacity * 0.09 },
+        { spread: sz * 1.45, alpha: stroke.opacity * 0.06 },
+      ];
+
+      for (let pi = 0; pi < passes.length; pi++) {
+        const { spread, alpha } = passes[pi];
+        const dim = Math.ceil(spread * 2) + 2;
+
+        // Crear stamp una sola vez por pass
+        const stamp = document.createElement("canvas");
+        stamp.width = stamp.height = dim;
+        const sc = stamp.getContext("2d")!;
+        const cx = dim / 2, cy = dim / 2;
+        const grad = sc.createRadialGradient(cx, cy, 0, cx, cy, spread);
+        if (erasing) {
+          grad.addColorStop(0,   "rgba(0,0,0,0.9)");
+          grad.addColorStop(0.5, "rgba(0,0,0,0.3)");
+          grad.addColorStop(1,   "rgba(0,0,0,0)");
+        } else {
+          grad.addColorStop(0,   `rgba(${r},${g},${b},1)`);
+          grad.addColorStop(0.45,`rgba(${r},${g},${b},0.35)`);
+          grad.addColorStop(1,   `rgba(${r},${g},${b},0)`);
+        }
+        sc.fillStyle = grad;
+        sc.fillRect(0, 0, dim, dim);
+
+        ctx.globalAlpha = alpha;
+        for (let p = start; p < pts.length; p++) {
           const pt = pts[p];
-          const spread = sz*(0.9+pass*0.3);
-          const grad = ctx.createRadialGradient(
-            pt.x+(prng(pass*9901+p*7)-0.5)*sz*0.3,
-            pt.y+(prng(pass*8803+p*11)-0.5)*sz*0.3,
-            0, pt.x, pt.y, spread
-          );
-          if (erasing) {
-            grad.addColorStop(0,"rgba(0,0,0,0.8)");
-            grad.addColorStop(0.6,"rgba(0,0,0,0.15)");
-            grad.addColorStop(1,"rgba(0,0,0,0)");
-          } else {
-            grad.addColorStop(0,`rgba(${r},${g},${b},0.85)`);
-            grad.addColorStop(0.5,`rgba(${r},${g},${b},0.25)`);
-            grad.addColorStop(1,`rgba(${r},${g},${b},0)`);
-          }
-          ctx.fillStyle=grad;
-          ctx.beginPath();
-          ctx.arc(pt.x, pt.y, spread, 0, Math.PI*2);
-          ctx.fill();
+          // Pequeño jitter reproducible para efecto aguado
+          const jx = (prng(pi*9901 + p*7)  - 0.5) * sz * 0.28;
+          const jy = (prng(pi*8803 + p*11) - 0.5) * sz * 0.28;
+          ctx.drawImage(stamp, pt.x + jx - cx, pt.y + jy - cy);
         }
       }
     }
