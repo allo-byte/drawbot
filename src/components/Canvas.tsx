@@ -37,6 +37,10 @@ type Props = {
   setUsers?: (users: string[]) => void;
   onReady?: (saveFn: () => void) => void;
   onBgColor?: (color: string) => void;
+  onStrokeAdded?: (
+    getMyStrokes: () => Stroke[],
+    setMyStrokes: (s: Stroke[]) => void
+  ) => void;
 };
 
 function hexRgb(hex: string) {
@@ -60,7 +64,7 @@ const WORLD_H = 4096;
 
 export default function Canvas({
   color, brushSize, opacity, eraser, brushType, panMode, username,
-  bgColor, canvasSize, setUsers, onReady, onBgColor,
+  bgColor, canvasSize, setUsers, onReady, onBgColor, onStrokeAdded,
 }: Props) {
   const canvasRef         = useRef<HTMLCanvasElement>(null);
   const offscreenRef      = useRef<HTMLCanvasElement | null>(null);
@@ -68,6 +72,7 @@ export default function Canvas({
   const wsRef             = useRef<WebSocket | null>(null);
   const cursorsRef        = useRef<Map<string, Cursor>>(new Map());
   const strokesRef        = useRef<Stroke[]>([]);
+  const myStrokesRef      = useRef<Stroke[]>([]);
   const currentStrokeRef  = useRef<Stroke | null>(null);
   const offscreenCountRef = useRef(0);
   const rafRef            = useRef<number | null>(null);
@@ -447,6 +452,12 @@ export default function Canvas({
         requestFrame(); return;
       }
       if (data.type === "bgcolor") { onBgColor?.(data.color); return; }
+      if (data.type === "reload_strokes") {
+        strokesRef.current = data.strokes || [];
+        offscreenCountRef.current = 0;
+        rebuildOffscreen();
+        requestFrame(); return;
+      }
       if (data.type === "cursor") {
         cursorsRef.current.set(data.userId, { x:data.x, y:data.y, userId:data.username });
         requestFrame();
@@ -562,10 +573,30 @@ export default function Canvas({
       if (!currentStrokeRef.current) return;
       const stroke = currentStrokeRef.current;
       strokesRef.current.push(stroke);
+      myStrokesRef.current = [...myStrokesRef.current, stroke];
       flushToOffscreen();
       currentStrokeRef.current = null;
       if (wsRef.current?.readyState===WebSocket.OPEN)
         wsRef.current.send(JSON.stringify({type:"stroke",stroke}));
+      // Notificar App para que pueda hacer undo/redo
+      onStrokeAdded?.(
+        () => myStrokesRef.current,
+        (newMyStrokes: Stroke[]) => {
+          // Reconstruir strokesRef quitando mis strokes viejos y poniendo los nuevos
+          const othersStrokes = strokesRef.current.filter(
+            s => !myStrokesRef.current.includes(s)
+          );
+          myStrokesRef.current = newMyStrokes;
+          strokesRef.current = [...othersStrokes, ...newMyStrokes];
+          offscreenCountRef.current = 0;
+          rebuildOffscreen();
+          requestFrame();
+          // Sincronizar con servidor — enviar clear + todos los strokes
+          if (wsRef.current?.readyState === WebSocket.OPEN) {
+            wsRef.current.send(JSON.stringify({ type: "undo_sync", strokes: strokesRef.current }));
+          }
+        }
+      );
       requestFrame();
     };
 

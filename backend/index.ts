@@ -94,7 +94,8 @@ wss.on("connection", (ws: WebSocket) => {
     }
 
     if (data.type === "stroke") {
-      roomStrokes.get(roomId)?.push(data.stroke);
+      const stroke = { ...data.stroke, _uid: userId };
+      roomStrokes.get(roomId)?.push(stroke);
     }
 
     if (data.type === "clear") {
@@ -130,6 +131,22 @@ wss.on("connection", (ws: WebSocket) => {
       rooms.get(roomId)?.forEach((c) => {
         if (c !== ws && c.readyState === WebSocket.OPEN)
           c.send(JSON.stringify({ ...data, userId }));
+      });
+      return;
+    }
+
+    // Undo/redo: el usuario envía sus strokes actualizados
+    // El servidor reemplaza sus strokes en el historial de la sala
+    if (data.type === "undo_sync") {
+      const roomStrokeList = roomStrokes.get(roomId) || [];
+      // Quitar todos los strokes anteriores de este userId y poner los nuevos
+      const others = roomStrokeList.filter((s: any) => s._uid !== userId);
+      const mine   = (data.strokes || []).map((s: any) => ({ ...s, _uid: userId }));
+      roomStrokes.set(roomId, [...others, ...mine]);
+      // Notificar a los demás para que recarguen
+      rooms.get(roomId)?.forEach((c) => {
+        if (c !== ws && c.readyState === WebSocket.OPEN)
+          c.send(JSON.stringify({ type: "reload_strokes", strokes: roomStrokes.get(roomId) }));
       });
       return;
     }
