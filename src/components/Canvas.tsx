@@ -22,6 +22,8 @@ type Stroke = {
 };
 type Cursor = { x: number; y: number; userId: string };
 
+export type CanvasSize = { w: number; h: number } | null; // null = infinito
+
 type Props = {
   color: string;
   brushSize: number;
@@ -31,7 +33,7 @@ type Props = {
   panMode: boolean;
   username: string;
   bgColor: string;
-  canvasSize?: { w: number; h: number };
+  canvasSize: CanvasSize;
   setUsers?: (users: string[]) => void;
   onReady?: (saveFn: () => void) => void;
   onBgColor?: (color: string) => void;
@@ -70,27 +72,29 @@ export default function Canvas({
   const offscreenCountRef = useRef(0);
   const rafRef            = useRef<number | null>(null);
 
-  const colorRef     = useRef(color);
-  const sizeRef      = useRef(brushSize);
-  const opacityRef   = useRef(opacity);
-  const eraserRef    = useRef(eraser);
-  const brushTypeRef = useRef(brushType);
-  const panModeRef   = useRef(panMode);
-  const bgColorRef   = useRef(bgColor);
-  const panStartRef      = useRef<{x:number;y:number;vx:number;vy:number} | null>(null);
+  const colorRef       = useRef(color);
+  const sizeRef        = useRef(brushSize);
+  const opacityRef     = useRef(opacity);
+  const eraserRef      = useRef(eraser);
+  const brushTypeRef   = useRef(brushType);
+  const panModeRef     = useRef(panMode);
+  const bgColorRef     = useRef(bgColor);
+  const canvasSizeRef  = useRef(canvasSize);
+  const panStartRef    = useRef<{x:number;y:number;vx:number;vy:number} | null>(null);
   const lastSentPointRef = useRef(0);
-  const viewRef      = useRef({ x: 0, y: 0, scale: 1 });
+  const viewRef        = useRef({ x: 0, y: 0, scale: 1 });
   const touchPointersRef = useRef<Map<number, {x:number;y:number}>>(new Map());
 
-  colorRef.current     = color;
-  sizeRef.current      = brushSize;
-  opacityRef.current   = opacity;
-  eraserRef.current    = eraser;
-  brushTypeRef.current = brushType;
-  panModeRef.current   = panMode;
-  bgColorRef.current   = bgColor;
+  colorRef.current      = color;
+  sizeRef.current       = brushSize;
+  opacityRef.current    = opacity;
+  eraserRef.current     = eraser;
+  brushTypeRef.current  = brushType;
+  panModeRef.current    = panMode;
+  bgColorRef.current    = bgColor;
+  canvasSizeRef.current = canvasSize;
 
-  const MIN_SCALE = 0.1;
+  const MIN_SCALE = 0.05;
   const MAX_SCALE = 10;
 
   const toWorld = (sx: number, sy: number) => {
@@ -265,10 +269,9 @@ export default function Canvas({
   const flushToOffscreen = () => {
     const off = offscreenRef.current; if (!off) return;
     const ctx = off.getContext("2d"); if (!ctx) return;
-    const strokes = strokesRef.current;
-    for (let i = offscreenCountRef.current; i < strokes.length; i++)
-      drawStroke(ctx, strokes[i]);
-    offscreenCountRef.current = strokes.length;
+    for (let i = offscreenCountRef.current; i < strokesRef.current.length; i++)
+      drawStroke(ctx, strokesRef.current[i]);
+    offscreenCountRef.current = strokesRef.current.length;
   };
 
   const rebuildOffscreen = () => {
@@ -293,19 +296,49 @@ export default function Canvas({
     ctx.setTransform(1,0,0,1,0,0);
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
+    // Fondo exterior (fuera del lienzo)
+    ctx.fillStyle = "#1a1a1a";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
     ctx.save();
     ctx.scale(dpr, dpr);
     ctx.translate(v.x, v.y);
     ctx.scale(v.scale, v.scale);
-    ctx.drawImage(off, 0, 0);
 
+    const cs = canvasSizeRef.current;
+    if (cs) {
+      // Sombra del lienzo
+      ctx.shadowColor = "rgba(0,0,0,0.5)";
+      ctx.shadowBlur  = 20 / v.scale;
+      ctx.fillStyle   = bgColorRef.current;
+      ctx.fillRect(0, 0, cs.w, cs.h);
+      ctx.shadowBlur  = 0;
+      // Clip al área del lienzo
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(0, 0, cs.w, cs.h);
+      ctx.clip();
+      ctx.drawImage(off, 0, 0);
+      ctx.restore();
+      // Borde del lienzo
+      ctx.strokeStyle = "rgba(255,255,255,0.12)";
+      ctx.lineWidth   = 1 / v.scale;
+      ctx.strokeRect(0, 0, cs.w, cs.h);
+    } else {
+      // Modo infinito — solo dibujar offscreen
+      ctx.drawImage(off, 0, 0);
+    }
+
+    // Stroke activo
     if (currentStrokeRef.current)
       drawStroke(ctx, currentStrokeRef.current);
 
+    // Previews remotos
     remotePreviewsRef.current.forEach((stroke) => {
       if (stroke.points.length > 1) drawStroke(ctx, stroke);
     });
 
+    // Cursores
     cursorsRef.current.forEach((cursor) => {
       ctx.beginPath();
       ctx.fillStyle = "#00ff88";
@@ -325,36 +358,27 @@ export default function Canvas({
     rafRef.current = requestAnimationFrame(compositeNow);
   };
 
-  const redraw = () => { requestFrame(); };
+  const redraw    = () => { requestFrame(); };
   const redrawFull = () => { rebuildOffscreen(); requestFrame(); };
 
   useEffect(() => { redrawFull(); }, [bgColor]);
+  useEffect(() => { requestFrame(); }, [canvasSize]);
 
-  // ── Cambio de tamaño de lienzo ──────────────────────────────────────────
+  // Centrar el lienzo cuando cambia la resolución
   useEffect(() => {
-    if (!canvasSize || (canvasSize.w === 0 && canvasSize.h === 0)) return;
-    const off = offscreenRef.current;
-    if (!off) return;
-    off.width  = canvasSize.w;
-    off.height = canvasSize.h;
-    const ctx = off.getContext("2d");
-    if (!ctx) return;
-    ctx.fillStyle = bgColorRef.current;
-    ctx.fillRect(0, 0, canvasSize.w, canvasSize.h);
-    strokesRef.current.forEach(s => drawStroke(ctx, s));
-    offscreenCountRef.current = strokesRef.current.length;
-    const canvas = canvasRef.current;
-    if (canvas) {
-      const dpr = window.devicePixelRatio || 1;
-      const vw = canvas.width / dpr;
-      const vh = canvas.height / dpr;
-      const scale = Math.min(vw / canvasSize.w, vh / canvasSize.h, 1) * 0.9;
-      viewRef.current = {
-        x: (vw - canvasSize.w * scale) / 2,
-        y: (vh - canvasSize.h * scale) / 2,
-        scale,
-      };
-    }
+    const cs = canvasSize;
+    if (!cs) return;
+    const canvas = canvasRef.current; if (!canvas) return;
+    const vw = canvas.clientWidth;
+    const vh = canvas.clientHeight;
+    const scaleX = (vw * 0.85) / cs.w;
+    const scaleY = (vh * 0.85) / cs.h;
+    const scale  = Math.min(scaleX, scaleY, 1);
+    viewRef.current = {
+      x: (vw - cs.w * scale) / 2,
+      y: (vh - cs.h * scale) / 2,
+      scale,
+    };
     requestFrame();
   }, [canvasSize]);
 
@@ -440,6 +464,9 @@ export default function Canvas({
 
     const startStroke = (pos:{x:number;y:number}) => {
       const world = toWorld(pos.x, pos.y);
+      // Si hay lienzo con tamaño, clamp dentro
+      const cs = canvasSizeRef.current;
+      if (cs && (world.x < 0 || world.y < 0 || world.x > cs.w || world.y > cs.h)) return;
       currentStrokeRef.current = {
         points:[world], color:colorRef.current, size:sizeRef.current,
         opacity:opacityRef.current, eraser:eraserRef.current, brushType:brushTypeRef.current,
@@ -448,18 +475,16 @@ export default function Canvas({
     };
 
     const STREAM_EVERY = 3;
-    const streamStroke = (_world?: {x:number;y:number}) => {
+    const streamStroke = () => {
       const stroke = currentStrokeRef.current;
       if (!stroke || wsRef.current?.readyState !== WebSocket.OPEN) return;
       const total = stroke.points.length;
       const sent  = lastSentPointRef.current;
       if (total - sent >= STREAM_EVERY) {
         wsRef.current.send(JSON.stringify({
-          type:   "stroke_update",
-          color:  stroke.color,
-          size:   stroke.size,
-          opacity: stroke.opacity,
-          eraser: stroke.eraser,
+          type: "stroke_update",
+          color: stroke.color, size: stroke.size,
+          opacity: stroke.opacity, eraser: stroke.eraser,
           brushType: stroke.brushType,
           points: stroke.points.slice(sent),
         }));
@@ -498,17 +523,15 @@ export default function Canvas({
             x: panStartRef.current.vx + dx,
             y: panStartRef.current.vy + dy,
           };
-          requestFrame();
-          return;
+          requestFrame(); return;
         }
         if (!currentStrokeRef.current) return;
         const world = toWorld(pos.x, pos.y);
         if (wsRef.current?.readyState===WebSocket.OPEN)
           wsRef.current.send(JSON.stringify({type:"cursor",x:world.x,y:world.y}));
         currentStrokeRef.current.points.push(world);
-        streamStroke(world);
-        requestFrame();
-        return;
+        streamStroke();
+        requestFrame(); return;
       }
 
       touchPointersRef.current.set(e.pointerId, pos);
@@ -523,8 +546,7 @@ export default function Canvas({
           scale:ns,
         };
         lastPinchDist=info.dist; lastPinchMid=info.mid;
-        redraw();
-        return;
+        redraw(); return;
       }
 
       if (!currentStrokeRef.current) return;
@@ -532,7 +554,7 @@ export default function Canvas({
       if (wsRef.current?.readyState===WebSocket.OPEN)
         wsRef.current.send(JSON.stringify({type:"cursor",x:world.x,y:world.y}));
       currentStrokeRef.current.points.push(world);
-      streamStroke(world);
+      streamStroke();
       requestFrame();
     };
 
@@ -548,9 +570,7 @@ export default function Canvas({
     };
 
     const onPointerUp = (e: PointerEvent) => {
-      if (e.pointerType==="pen"||e.pointerType==="mouse") {
-        panStartRef.current = null;
-      }
+      if (e.pointerType==="pen"||e.pointerType==="mouse") panStartRef.current = null;
       if (e.pointerType==="touch") touchPointersRef.current.delete(e.pointerId);
       if (currentStrokeRef.current && touchPointersRef.current.size===0) finishStroke();
       if ((e.pointerType==="pen"||e.pointerType==="mouse") && currentStrokeRef.current) finishStroke();
@@ -574,10 +594,26 @@ export default function Canvas({
     canvas.addEventListener("wheel", onWheel, { passive:false });
 
     const savePNG = () => {
-      const link=document.createElement("a");
-      link.download=`drawbot-${Date.now()}.png`;
-      link.href=(offscreenRef.current as HTMLCanvasElement).toDataURL("image/png");
-      link.click();
+      const cs = canvasSizeRef.current;
+      if (cs) {
+        // Exportar solo el área del lienzo
+        const exportCanvas = document.createElement("canvas");
+        exportCanvas.width  = cs.w;
+        exportCanvas.height = cs.h;
+        const ectx = exportCanvas.getContext("2d")!;
+        ectx.fillStyle = bgColorRef.current;
+        ectx.fillRect(0, 0, cs.w, cs.h);
+        ectx.drawImage(offscreenRef.current!, 0, 0, cs.w, cs.h, 0, 0, cs.w, cs.h);
+        const link = document.createElement("a");
+        link.download = `drawbot-${cs.w}x${cs.h}-${Date.now()}.png`;
+        link.href = exportCanvas.toDataURL("image/png");
+        link.click();
+      } else {
+        const link = document.createElement("a");
+        link.download = `drawbot-${Date.now()}.png`;
+        link.href = (offscreenRef.current as HTMLCanvasElement).toDataURL("image/png");
+        link.click();
+      }
     };
     onReady?.(savePNG);
 
@@ -601,8 +637,7 @@ export default function Canvas({
     <canvas
       ref={canvasRef}
       style={{
-        position:"fixed",
-        top:52, left:52,
+        position:"fixed", top:52, left:52,
         width:"calc(100vw - 52px)",
         height:"calc(100vh - 52px)",
         display:"block",

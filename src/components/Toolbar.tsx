@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import type { Dispatch, SetStateAction } from "react";
-import type { BrushType } from "./Canvas";
+import type { BrushType, CanvasSize } from "./Canvas";
 
 type Setter<T> = Dispatch<SetStateAction<T>> | ((v: T) => void);
 
@@ -19,6 +19,8 @@ type Props = {
   setBgColor: Setter<string>;
   panMode: boolean;
   setPanMode: Setter<boolean>;
+  canvasSize: CanvasSize;
+  setCanvasSize: Setter<CanvasSize>;
   savePNG: () => void;
   users: string[];
   username: string;
@@ -26,7 +28,6 @@ type Props = {
   room: string;
   createRoom: () => void;
   copyRoomLink: () => void;
-  onCanvasResize?: (w: number, h: number) => void;
 };
 
 const BRUSH_ICONS: Record<BrushType | "eraser", React.ReactNode> = {
@@ -112,18 +113,6 @@ const BRUSHES: { type: BrushType; label: string }[] = [
   { type: "pencil",      label: "Lápiz"     },
 ];
 
-// Tamaños de lienzo predefinidos (igual que la imagen de referencia)
-const CANVAS_PRESETS = [
-  { label: "Personalizado",  w: 0,    h: 0,    ratio: "",        icon: "✏️" },
-  { label: "HD Calidad",     w: 2388, h: 1668, ratio: "2388×1668", icon: "▭" },
-  { label: "1:1 (2K)",       w: 2048, h: 2048, ratio: "2048×2048", icon: "□" },
-  { label: "3:4 (2K)",       w: 2048, h: 1536, ratio: "2048×1536", icon: "▭" },
-  { label: "9:16 (2K)",      w: 1920, h: 1080, ratio: "1920×1080", icon: "▭" },
-  { label: "Encabezado X",   w: 1500, h: 500,  ratio: "1500×500",  icon: "▬" },
-  { label: "Sello Chat",     w: 370,  h: 320,  ratio: "370×320",   icon: "▭" },
-  { label: "Vertical",       w: 690,  h: 4096, ratio: "690×4096",  icon: "▯" },
-];
-
 function userColor(name: string) {
   const colors = ["#e05d5d","#e09a3a","#d4c94a","#5dbe6e","#4ab8d4","#7070dd","#c46edd","#dd6eaa"];
   let hash = 0;
@@ -143,6 +132,7 @@ function UserAvatar({ name, size = 28 }: { name: string; size?: number }) {
   );
 }
 
+// Slider vertical reutilizable
 function VSlider({ value, min, max, onChange, color = "#7070dd", label }: {
   value: number; min: number; max: number;
   onChange: (v: number) => void; color?: string; label?: string;
@@ -174,11 +164,14 @@ function VSlider({ value, min, max, onChange, color = "#7070dd", label }: {
         style={{ position:"relative", width:28, height:220, cursor:"ns-resize",
           display:"flex", alignItems:"center", justifyContent:"center", touchAction:"none" }}
         onPointerDown={handlePointer}>
+        {/* Track bg */}
         <div style={{ position:"absolute", left:"50%", top:0, bottom:0, width:6,
           transform:"translateX(-50%)", borderRadius:3, background:"#222" }}/>
+        {/* Fill */}
         <div style={{ position:"absolute", left:"50%", bottom:0, width:6,
           transform:"translateX(-50%)", borderRadius:3,
           height:`${pct}%`, background:color }}/>
+        {/* Thumb */}
         <div style={{ position:"absolute", left:"50%", transform:"translateX(-50%)",
           top:`${100-pct}%`, marginTop:-12,
           width:24, height:24, borderRadius:"50%",
@@ -197,25 +190,23 @@ export default function Toolbar({
   opacity, setOpacity, eraser, setEraser,
   brushType, setBrushType, bgColor, setBgColor,
   panMode, setPanMode,
+  canvasSize, setCanvasSize,
   savePNG, users, username, setUsername, room, createRoom, copyRoomLink,
-  onCanvasResize,
 }: Props) {
   const [showBrushes,  setShowBrushes ] = useState(false);
   const [showColor,    setShowColor   ] = useState(false);
   const [showUsers,    setShowUsers   ] = useState(false);
   const [showRoom,     setShowRoom    ] = useState(false);
   const [showCanvas,   setShowCanvas  ] = useState(false);
+  const [customW,      setCustomW     ] = useState(1920);
+  const [customH,      setCustomH     ] = useState(1080);
   const [editingNick,  setEditingNick ] = useState(false);
   const [nickDraft,    setNickDraft   ] = useState(username);
   const [hex,          setHex         ] = useState(color);
-  const [customW,      setCustomW     ] = useState(2048);
-  const [customH,      setCustomH     ] = useState(2048);
   const nickRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => setHex(color), [color]);
   useEffect(() => { if (editingNick) nickRef.current?.focus(); }, [editingNick]);
-
-  const closeAll = () => { setShowBrushes(false); setShowColor(false); setShowUsers(false); setShowRoom(false); setShowCanvas(false); };
 
   const saveNick = () => {
     const t = nickDraft.trim() || "Invitado";
@@ -238,17 +229,14 @@ export default function Toolbar({
 
   const activeBrush = BRUSHES.find(b => b.type === brushType);
 
-  const applyPreset = (w: number, h: number) => {
-    onCanvasResize?.(w, h);
-    setShowCanvas(false);
-  };
-
   return (
     <>
       <style>{`
+        /* ── Reset inputs ── */
         .tb * { box-sizing: border-box; }
         input[type=number]::-webkit-inner-spin-button { opacity:1; }
 
+        /* ── Barra superior ── */
         .tb-top {
           position: fixed; top: 0; left: 0; right: 0;
           height: 52px; z-index: 1000;
@@ -258,6 +246,8 @@ export default function Toolbar({
           display: flex; align-items: center;
           padding: 0 12px; gap: 8px;
         }
+
+        /* ── Barra izquierda (sliders) ── */
         .tb-left {
           position: fixed; left: 0; top: 52px; bottom: 0;
           width: 52px; z-index: 999;
@@ -268,6 +258,8 @@ export default function Toolbar({
           align-items: center; justify-content: center;
           gap: 24px; padding: 16px 0;
         }
+
+        /* ── Botones de toolbar ── */
         .tb-btn {
           width: 36px; height: 36px; border-radius: 10px;
           border: 0.5px solid #333; background: #1e1e1e;
@@ -280,6 +272,8 @@ export default function Toolbar({
         .tb-btn:hover { background: #2a2a2a; border-color: #555; }
         .tb-btn.active { background: #2a2a5a; border-color: #7070dd; color: #aaaaff; }
         .tb-btn.eraser-active { background: #3a2a2a; border-color: #dd7070; color: #ffaaaa; }
+
+        /* ── Color swatch ── */
         .tb-color-btn {
           width: 32px; height: 32px; border-radius: 50%;
           border: 2px solid #555; cursor: pointer; flex-shrink: 0;
@@ -287,8 +281,16 @@ export default function Toolbar({
           -webkit-tap-highlight-color: transparent;
         }
         .tb-color-btn:hover { transform: scale(1.1); border-color: #aaa; }
-        .tb-sep { width: 1px; height: 28px; background: #2e2e2e; flex-shrink: 0; }
-        .tb-sep-h { height: 1px; width: 28px; background: #2e2e2e; flex-shrink: 0; }
+
+        /* ── Separador ── */
+        .tb-sep {
+          width: 1px; height: 28px; background: #2e2e2e; flex-shrink: 0;
+        }
+        .tb-sep-h {
+          height: 1px; width: 28px; background: #2e2e2e; flex-shrink: 0;
+        }
+
+        /* ── Paneles flotantes ── */
         .tb-panel {
           position: fixed; z-index: 1100;
           background: rgba(22,22,22,0.97);
@@ -296,13 +298,37 @@ export default function Toolbar({
           box-shadow: 0 8px 32px rgba(0,0,0,0.7);
           padding: 14px;
         }
-        .tb-panel-brushes { top: 60px; left: 50%; transform: translateX(-50%); width: min(92vw, 380px); }
-        .tb-panel-color   { top: 60px; left: 60px; width: 300px; }
-        .tb-panel-users   { top: 60px; right: 12px; width: 220px; }
-        .tb-panel-room    { top: 60px; right: 12px; width: 260px; }
-        .tb-panel-canvas  { top: 60px; left: 50%; transform: translateX(-50%); width: min(92vw, 340px); }
 
-        .tb-brushgrid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+        /* Panel pinceles — aparece bajo la barra */
+        .tb-panel-brushes {
+          top: 60px; left: 50%; transform: translateX(-50%);
+          width: min(92vw, 380px);
+        }
+
+        /* Panel color — aparece bajo el swatch */
+        .tb-panel-color {
+          top: 60px; left: 60px;
+          width: 300px;
+        }
+
+        /* Panel usuarios */
+        .tb-panel-users {
+          top: 60px; right: 12px;
+          width: 220px;
+        }
+
+        /* Panel sala */
+        .tb-panel-room {
+          top: 60px; right: 12px;
+          width: 260px;
+        }
+
+        /* ── Grid de pinceles ── */
+        .tb-brushgrid {
+          display: grid;
+          grid-template-columns: repeat(4, 1fr);
+          gap: 6px;
+        }
         .tb-brushbtn {
           display: flex; flex-direction: column; align-items: center;
           gap: 4px; padding: 8px 4px; border-radius: 10px;
@@ -316,19 +342,16 @@ export default function Toolbar({
         .tb-brushbtn.active .lbl { color: #9999ee; }
         .tb-brushbtn:hover { background: #222; }
 
-        /* ── Presets de lienzo ── */
-        .tb-canvas-preset {
-          display: flex; align-items: center; justify-content: space-between;
-          padding: 9px 10px; border-radius: 8px; cursor: pointer;
-          border: 0.5px solid #2a2a2a; background: #1a1a1a;
-          margin-bottom: 5px; transition: background .12s, border-color .12s;
-          -webkit-tap-highlight-color: transparent;
+        /* ── Slider label ── */
+        .tb-slider-label {
+          font-size: 10px; color: #555; text-align: center;
+          writing-mode: horizontal-tb;
         }
-        .tb-canvas-preset:hover { background: #222; border-color: #444; }
-        .tb-canvas-preset.active { border-color: #7070dd; background: #1e1e3a; }
-        .tb-canvas-preset-label { color: #ccc; font-size: 13px; display: flex; align-items: center; gap: 8px; }
-        .tb-canvas-preset-size  { color: #555; font-size: 12px; font-family: monospace; }
+        .tb-slider-val {
+          font-size: 11px; color: #888; text-align: center; min-width: 32px;
+        }
 
+        /* ── Color panel inputs ── */
         .tb-num {
           width: 52px; background: #1a1a1a; border: 0.5px solid #333;
           border-radius: 6px; color: #ccc; font-size: 12px;
@@ -336,124 +359,165 @@ export default function Toolbar({
         }
         .tb-hex {
           width: 88px; background: #1a1a1a; border: 0.5px solid #333;
-          border-radius: 6px; color: #ccc; font-size: 12px; padding: 4px 6px;
+          border-radius: 6px; color: #ccc; font-size: 12px;
+          padding: 4px 6px;
         }
-        .tb-user-item { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 8px; }
+
+        /* ── Usuario ── */
+        .tb-user-item {
+          display: flex; align-items: center; gap: 8px;
+          padding: 6px 8px; border-radius: 8px;
+        }
         .tb-user-item:hover { background: #1e1e1e; }
-        .tb-you { font-size: 10px; color: #7070dd; background: #1e1e3a; border-radius: 4px; padding: 1px 5px; }
+        .tb-you { font-size: 10px; color: #7070dd; background: #1e1e3a;
+          border-radius: 4px; padding: 1px 5px; }
+
+        /* ── Nick edit ── */
         .tb-nick-input {
           background: #1a1a1a; border: 0.5px solid #444; border-radius: 8px;
-          color: #ccc; font-size: 13px; padding: 6px 8px; flex: 1; outline: none;
+          color: #ccc; font-size: 13px; padding: 6px 8px; flex: 1;
+          outline: none;
         }
         .tb-nick-input:focus { border-color: #7070dd; }
+
+        /* ── Small btn ── */
         .tb-small-btn {
           background: #1e1e1e; border: 0.5px solid #333; border-radius: 8px;
           color: #aaa; font-size: 12px; padding: 5px 10px; cursor: pointer;
           -webkit-tap-highlight-color: transparent;
         }
         .tb-small-btn:hover { background: #2a2a2a; }
-        .tb-confirm-btn { background: #1e3a1e; border-color: #3a7a3a; color: #8f8; }
+        .tb-confirm-btn {
+          background: #1e3a1e; border-color: #3a7a3a; color: #8f8;
+        }
+
+        /* ── Fondo swatches ── */
         .tb-bg-swatch {
           width: 22px; height: 22px; border-radius: 5px; cursor: pointer;
-          border: 1.5px solid #444; flex-shrink: 0; transition: transform .1s;
+          border: 1.5px solid #444; flex-shrink: 0;
+          transition: transform .1s;
         }
         .tb-bg-swatch:hover { transform: scale(1.15); }
         .tb-bg-swatch.sel { border-color: #7070dd; }
-        .tb-overlay { position: fixed; inset: 0; z-index: 1050; }
-        .tb-section { font-size: 10px; color: #555; text-transform: uppercase; letter-spacing: .06em; margin-bottom: 8px; }
+
+        /* ── Overlay para cerrar paneles ── */
+        .tb-overlay {
+          position: fixed; inset: 0; z-index: 1050;
+        }
+
+        /* ── Label de sección ── */
+        .tb-section {
+          font-size: 10px; color: #555; text-transform: uppercase;
+          letter-spacing: .06em; margin-bottom: 8px;
+        }
+
+        /* ── Avatar stack ── */
         .tb-avatar-stack { display: flex; }
         .tb-avatar-stack > * { margin-left: -5px; }
         .tb-avatar-stack > *:first-child { margin-left: 0; }
 
         @media (max-width: 480px) {
           .tb-panel-brushes { left: 52px; transform: none; width: calc(100vw - 64px); }
-          .tb-panel-color   { left: 52px; width: calc(100vw - 64px); }
-          .tb-panel-canvas  { left: 52px; transform: none; width: calc(100vw - 64px); }
+          .tb-panel-color { left: 52px; width: calc(100vw - 64px); }
         }
       `}</style>
 
-      {/* ═══ BARRA SUPERIOR ═══ */}
+      {/* ═══════════════════════════════════════════════
+          BARRA SUPERIOR
+      ═══════════════════════════════════════════════ */}
       <div className="tb-top">
 
+        {/* Avatar + nick */}
         <div style={{ display:"flex", alignItems:"center", gap:6, cursor:"pointer" }}
-          onClick={() => { closeAll(); setShowUsers(u=>!u); }}>
+          onClick={() => { setShowUsers(u=>!u); setShowBrushes(false); setShowColor(false); setShowRoom(false); }}>
           <UserAvatar name={username} size={30} />
         </div>
 
         <div className="tb-sep"/>
 
+        {/* Color del pincel */}
         <div className="tb-color-btn"
           style={{ background: color }}
-          onClick={() => { closeAll(); setShowColor(c=>!c); }}
+          onClick={() => { setShowColor(c=>!c); setShowBrushes(false); setShowUsers(false); setShowRoom(false); }}
         />
 
+        {/* Selector de pincel activo */}
         <div className={`tb-btn${showBrushes ? " active" : ""}`}
-          onClick={() => { closeAll(); setShowBrushes(b=>!b); }}
+          onClick={() => { setShowBrushes(b=>!b); setShowColor(false); setShowUsers(false); setShowRoom(false); }}
           title="Pinceles">
           {eraser ? BRUSH_ICONS.eraser : BRUSH_ICONS[brushType]}
         </div>
 
+        {/* Nombre del pincel activo */}
         <span style={{ color:"#666", fontSize:12, flexShrink:0 }}>
           {eraser ? "Borrador" : (activeBrush?.label ?? "Pincel")}
         </span>
 
         <div className="tb-sep"/>
 
-        {/* Tamaño de lienzo */}
-        <div className={`tb-btn${showCanvas ? " active" : ""}`}
-          onClick={() => { closeAll(); setShowCanvas(c=>!c); }}
-          title="Tamaño de lienzo" style={{ fontSize:14 }}>
-          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.8">
-            <rect x="3" y="3" width="18" height="18" rx="2" strokeDasharray="3 2"/>
-            <path d="M8 3v3M16 3v3M8 18v3M16 18v3M3 8h3M3 16h3M18 8h3M18 16h3"/>
-          </svg>
-        </div>
-
-        <div className="tb-sep"/>
-
+        {/* Herramienta mano */}
         <div className={`tb-btn${panMode ? " active" : ""}`}
           onClick={() => { setPanMode(!panMode); if (!panMode) setEraser(false); }}
           title="Mover lienzo" style={{ fontSize:16 }}>
           ✋
         </div>
 
+        {/* Borrador */}
         <div className={`tb-btn${eraser && !panMode ? " eraser-active" : ""}`}
           onClick={() => { setEraser(!eraser); setPanMode(false); }} title="Borrador">
           {BRUSH_ICONS.eraser}
         </div>
 
+        {/* Spacer */}
         <div style={{ flex:1 }}/>
 
+        {/* Usuarios */}
         <div className="tb-avatar-stack" style={{ cursor:"pointer" }}
-          onClick={() => { closeAll(); setShowUsers(u=>!u); }}>
+          onClick={() => { setShowUsers(u=>!u); setShowBrushes(false); setShowColor(false); setShowRoom(false); }}>
           {users.slice(0,3).map((u,i) => <UserAvatar key={i} name={u} size={26}/>)}
         </div>
         <span style={{ color:"#00ff88", fontSize:12, marginLeft:4 }}>{users.length}</span>
 
         <div className="tb-sep"/>
 
+        {/* Sala */}
         <div className={`tb-btn${showRoom ? " active" : ""}`}
-          onClick={() => { closeAll(); setShowRoom(r=>!r); }}
+          onClick={() => { setShowRoom(r=>!r); setShowBrushes(false); setShowColor(false); setShowUsers(false); }}
           title="Sala" style={{ fontSize:14 }}>
           🔗
         </div>
 
+        {/* Tamaño lienzo */}
+        <div className={`tb-btn${showCanvas ? " active" : ""}`}
+          onClick={() => { setShowCanvas(c=>!c); setShowBrushes(false); setShowColor(false); setShowUsers(false); setShowRoom(false); }}
+          title="Tamaño del lienzo" style={{ fontSize:13, gap:2, flexDirection:"column" as any }}>
+          <span style={{fontSize:10}}>⬜</span>
+          <span style={{fontSize:8, color:"#666"}}>px</span>
+        </div>
+
+        {/* Guardar */}
         <div className="tb-btn" onClick={savePNG} title="Guardar PNG" style={{ fontSize:14 }}>
           💾
         </div>
 
       </div>
 
-      {/* ═══ BARRA IZQUIERDA ═══ */}
+      {/* ═══════════════════════════════════════════════
+          BARRA IZQUIERDA — tamaño y opacidad
+      ═══════════════════════════════════════════════ */}
       <div className="tb-left">
+
         <VSlider value={brushSize} min={1} max={200}
           onChange={v => setBrushSize(v)} color="#7070dd" label="TAM"/>
         <div className="tb-sep-h"/>
         <VSlider value={Math.round(opacity*100)} min={0} max={100}
           onChange={v => setOpacity(v/100)} color="#e09a3a" label="OPA"/>
+
       </div>
 
-      {/* ═══ PANEL PINCELES ═══ */}
+      {/* ═══════════════════════════════════════════════
+          PANEL PINCELES
+      ═══════════════════════════════════════════════ */}
       {showBrushes && (
         <>
           <div className="tb-overlay" onClick={() => setShowBrushes(false)}/>
@@ -478,16 +542,22 @@ export default function Toolbar({
         </>
       )}
 
-      {/* ═══ PANEL COLOR ═══ */}
+      {/* ═══════════════════════════════════════════════
+          PANEL COLOR
+      ═══════════════════════════════════════════════ */}
       {showColor && (
         <>
           <div className="tb-overlay" onClick={() => setShowColor(false)}/>
           <div className="tb-panel tb-panel-color" style={{ zIndex:1100 }}>
+
+            {/* Color picker nativo grande */}
             <div style={{ display:"flex", justifyContent:"center", marginBottom:10 }}>
               <input type="color" value={color} onChange={e => setColor(e.target.value)}
                 style={{ width:80, height:80, border:"none", background:"none",
                   cursor:"pointer", padding:0, borderRadius:10 }} />
             </div>
+
+            {/* Hex */}
             <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:8 }}>
               <span style={{ color:"#555", fontSize:11 }}>HEX</span>
               <input value={hex}
@@ -495,6 +565,7 @@ export default function Toolbar({
                 style={{ flex:1, background:"#1a1a1a", border:"0.5px solid #333",
                   borderRadius:6, color:"#ccc", fontSize:13, padding:"5px 8px" }} />
             </div>
+            {/* RGB */}
             <div style={{ display:"flex", gap:6, marginBottom:10 }}>
               {(["r","g","b"] as const).map((ch,i) => (
                 <div key={ch} style={{ flex:1, display:"flex", flexDirection:"column", gap:3 }}>
@@ -509,6 +580,8 @@ export default function Toolbar({
                 </div>
               ))}
             </div>
+
+            {/* Color de fondo */}
             <div style={{ borderTop:"0.5px solid #2e2e2e", paddingTop:10 }}>
               <div className="tb-section">Fondo</div>
               <div style={{ display:"flex", alignItems:"center", gap:6 }}>
@@ -525,67 +598,19 @@ export default function Toolbar({
                 ))}
               </div>
             </div>
-          </div>
-        </>
-      )}
-
-      {/* ═══ PANEL TAMAÑO DE LIENZO ═══ */}
-      {showCanvas && (
-        <>
-          <div className="tb-overlay" onClick={() => setShowCanvas(false)}/>
-          <div className="tb-panel tb-panel-canvas" style={{ zIndex:1100 }}>
-            <div className="tb-section">Tamaño de lienzo</div>
-
-            {/* Presets */}
-            {CANVAS_PRESETS.filter(p => p.w > 0).map(p => (
-              <div key={p.label} className="tb-canvas-preset"
-                onClick={() => applyPreset(p.w, p.h)}>
-                <span className="tb-canvas-preset-label">
-                  <span style={{ fontSize:16, width:20, textAlign:"center", opacity:0.6 }}>
-                    {p.w > p.h ? "▬" : p.w === p.h ? "■" : "▮"}
-                  </span>
-                  {p.label}
-                </span>
-                <span className="tb-canvas-preset-size">{p.ratio}</span>
-              </div>
-            ))}
-
-            {/* Separador + Personalizado */}
-            <div style={{ borderTop:"0.5px solid #2a2a2a", marginTop:8, paddingTop:10 }}>
-              <div className="tb-section">Personalizado</div>
-              <div style={{ display:"flex", alignItems:"center", gap:8 }}>
-                <div style={{ flex:1, display:"flex", flexDirection:"column", gap:4 }}>
-                  <span style={{ color:"#555", fontSize:10 }}>ANCHO</span>
-                  <input type="number" min={100} max={8000} value={customW}
-                    onChange={e => setCustomW(Number(e.target.value))}
-                    style={{ width:"100%", background:"#1a1a1a", border:"0.5px solid #333",
-                      borderRadius:6, color:"#ccc", fontSize:13, padding:"5px 8px" }}/>
-                </div>
-                <span style={{ color:"#444", fontSize:18, marginTop:14 }}>×</span>
-                <div style={{ flex:1, display:"flex", flexDirection:"column", gap:4 }}>
-                  <span style={{ color:"#555", fontSize:10 }}>ALTO</span>
-                  <input type="number" min={100} max={8000} value={customH}
-                    onChange={e => setCustomH(Number(e.target.value))}
-                    style={{ width:"100%", background:"#1a1a1a", border:"0.5px solid #333",
-                      borderRadius:6, color:"#ccc", fontSize:13, padding:"5px 8px" }}/>
-                </div>
-                <button className="tb-small-btn tb-confirm-btn"
-                  style={{ marginTop:18, padding:"6px 12px" }}
-                  onClick={() => applyPreset(customW, customH)}>
-                  ✓
-                </button>
-              </div>
-            </div>
 
           </div>
         </>
       )}
 
-      {/* ═══ PANEL USUARIOS ═══ */}
+      {/* ═══════════════════════════════════════════════
+          PANEL USUARIOS
+      ═══════════════════════════════════════════════ */}
       {showUsers && (
         <>
           <div className="tb-overlay" onClick={() => setShowUsers(false)}/>
           <div className="tb-panel tb-panel-users" style={{ zIndex:1100 }}>
+
             <div className="tb-section">Tu perfil</div>
             {editingNick ? (
               <div style={{ display:"flex", gap:6, marginBottom:12 }}>
@@ -605,6 +630,7 @@ export default function Toolbar({
                 <span style={{ color:"#555", fontSize:11 }}>✏️</span>
               </div>
             )}
+
             <div style={{ borderTop:"0.5px solid #2e2e2e", paddingTop:10 }}>
               <div className="tb-section">En sala ({users.length})</div>
               {users.map((u,i) => (
@@ -615,11 +641,86 @@ export default function Toolbar({
                 </div>
               ))}
             </div>
+
           </div>
         </>
       )}
 
-      {/* ═══ PANEL SALA ═══ */}
+      {/* ═══════════════════════════════════════════════
+          PANEL TAMAÑO LIENZO
+      ═══════════════════════════════════════════════ */}
+      {showCanvas && (
+        <>
+          <div className="tb-overlay" onClick={() => setShowCanvas(false)}/>
+          <div className="tb-panel" style={{ zIndex:1100, top:60, right:12, width:280 }}>
+            <div className="tb-section" style={{ marginBottom:10 }}>Tamaño del lienzo</div>
+
+            {/* Presets */}
+            {[
+              { label:"Libre (infinito)",  w:0,    h:0    },
+              { label:"HD",                w:1920, h:1080 },
+              { label:"4K",                w:3840, h:2160 },
+              { label:"Cuadrado 2K",       w:2048, h:2048 },
+              { label:"A4 vertical",       w:2480, h:3508 },
+              { label:"Story 9:16",        w:1080, h:1920 },
+              { label:"Banner web",        w:1500, h:500  },
+              { label:"iPad",              w:2388, h:1668 },
+            ].map(p => {
+              const active = p.w === 0
+                ? canvasSize === null
+                : canvasSize?.w === p.w && canvasSize?.h === p.h;
+              return (
+                <div key={p.label}
+                  onClick={() => {
+                    setCanvasSize(p.w === 0 ? null : { w:p.w, h:p.h });
+                    setShowCanvas(false);
+                  }}
+                  style={{
+                    display:"flex", alignItems:"center", justifyContent:"space-between",
+                    padding:"8px 10px", borderRadius:8, cursor:"pointer", marginBottom:4,
+                    background: active ? "#1e1e3a" : "#1a1a1a",
+                    border: `0.5px solid ${active ? "#7070dd" : "#2a2a2a"}`,
+                  }}>
+                  <span style={{ color: active ? "#aaaaff" : "#ccc", fontSize:13 }}>{p.label}</span>
+                  <span style={{ color:"#555", fontSize:12 }}>
+                    {p.w === 0 ? "∞" : `${p.w} × ${p.h}`}
+                  </span>
+                </div>
+              );
+            })}
+
+            {/* Personalizado */}
+            <div style={{ marginTop:8, padding:"10px", background:"#1a1a1a",
+              borderRadius:8, border:"0.5px solid #2a2a2a" }}>
+              <div className="tb-section" style={{ marginBottom:8 }}>Personalizado</div>
+              <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+                <input type="number" min={1} max={8192} value={customW}
+                  onChange={e => setCustomW(Number(e.target.value))}
+                  style={{ flex:1, background:"#111", border:"0.5px solid #333",
+                    borderRadius:6, color:"#ccc", fontSize:13, padding:"5px 8px", textAlign:"center" }}/>
+                <span style={{ color:"#555" }}>×</span>
+                <input type="number" min={1} max={8192} value={customH}
+                  onChange={e => setCustomH(Number(e.target.value))}
+                  style={{ flex:1, background:"#111", border:"0.5px solid #333",
+                    borderRadius:6, color:"#ccc", fontSize:13, padding:"5px 8px", textAlign:"center" }}/>
+                <button
+                  onClick={() => { setCanvasSize({ w:customW, h:customH }); setShowCanvas(false); }}
+                  style={{ background:"#2a2a5a", border:"0.5px solid #7070dd", borderRadius:8,
+                    color:"#aaaaff", fontSize:12, padding:"5px 10px", cursor:"pointer" }}>
+                  ✓
+                </button>
+              </div>
+              <div style={{ color:"#444", fontSize:10, marginTop:4, textAlign:"center" }}>
+                máx 8192 × 8192 px
+              </div>
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* ═══════════════════════════════════════════════
+          PANEL SALA
+      ═══════════════════════════════════════════════ */}
       {showRoom && (
         <>
           <div className="tb-overlay" onClick={() => setShowRoom(false)}/>
