@@ -64,6 +64,7 @@ export default function Canvas({
   const canvasRef         = useRef<HTMLCanvasElement>(null);
   // offscreen en coordenadas MUNDO (sin zoom ni pan)
   const offscreenRef      = useRef<HTMLCanvasElement | null>(null);
+  const remotePreviewsRef = useRef<Map<string, Stroke>>(new Map());
   const wsRef             = useRef<WebSocket | null>(null);
   const cursorsRef        = useRef<Map<string, Cursor>>(new Map());
   const strokesRef        = useRef<Stroke[]>([]);
@@ -78,7 +79,8 @@ export default function Canvas({
   const brushTypeRef = useRef(brushType);
   const panModeRef   = useRef(panMode);
   const bgColorRef   = useRef(bgColor);
-  const panStartRef  = useRef<{x:number;y:number;vx:number;vy:number} | null>(null);
+  const panStartRef      = useRef<{x:number;y:number;vx:number;vy:number} | null>(null);
+  const lastSentPointRef = useRef(0); // índice del último punto enviado en streaming
   const viewRef      = useRef({ x: 0, y: 0, scale: 1 });
   const touchPointersRef = useRef<Map<number, {x:number;y:number}>>(new Map());
 
@@ -309,6 +311,11 @@ export default function Canvas({
     if (currentStrokeRef.current)
       drawStroke(ctx, currentStrokeRef.current);
 
+    // Previews remotos (trazos en progreso de otros usuarios)
+    remotePreviewsRef.current.forEach((stroke) => {
+      if (stroke.points.length > 1) drawStroke(ctx, stroke);
+    });
+
     // Cursores
     cursorsRef.current.forEach((cursor) => {
       ctx.beginPath();
@@ -374,12 +381,32 @@ export default function Canvas({
       }
       if (data.type === "users")  { setUsers?.(data.users||[]); return; }
       if (data.type === "stroke") {
+        // Stroke completo — reemplaza cualquier preview activo de ese userId
         strokesRef.current.push(data.stroke);
+        // Limpiar preview de ese usuario si existía
+        remotePreviewsRef.current.delete(data.userId || "");
         flushToOffscreen();
+        requestFrame(); return;
+      }
+      if (data.type === "stroke_update") {
+        // Puntos parciales — actualizar preview del usuario remoto
+        const uid = data.userId || "unknown";
+        const existing = remotePreviewsRef.current.get(uid);
+        if (existing) {
+          existing.points.push(...data.points);
+        } else {
+          remotePreviewsRef.current.set(uid, {
+            points: [...data.points],
+            color: data.color, size: data.size,
+            opacity: data.opacity, eraser: data.eraser,
+            brushType: data.brushType,
+          });
+        }
         requestFrame(); return;
       }
       if (data.type === "clear") {
         strokesRef.current = [];
+        remotePreviewsRef.current.clear();
         offscreenCountRef.current = 0;
         rebuildOffscreen();
         requestFrame(); return;
@@ -406,6 +433,29 @@ export default function Canvas({
         points:[world], color:colorRef.current, size:sizeRef.current,
         opacity:opacityRef.current, eraser:eraserRef.current, brushType:brushTypeRef.current,
       };
+      lastSentPointRef.current = 0;
+    };
+
+    // Enviar puntos nuevos del stroke activo a otros usuarios (streaming)
+    const STREAM_EVERY = 3; // enviar cada N puntos nuevos
+    const streamStroke = (_world?: {x:number;y:number}) => {
+      const stroke = currentStrokeRef.current;
+      if (!stroke || wsRef.current?.readyState !== WebSocket.OPEN) return;
+      const total = stroke.points.length;
+      const sent  = lastSentPointRef.current;
+      if (total - sent >= STREAM_EVERY) {
+        // Enviar solo los puntos nuevos como "stroke_update"
+        wsRef.current.send(JSON.stringify({
+          type:   "stroke_update",
+          color:  stroke.color,
+          size:   stroke.size,
+          opacity: stroke.opacity,
+          eraser: stroke.eraser,
+          brushType: stroke.brushType,
+          points: stroke.points.slice(sent),
+        }));
+        lastSentPointRef.current = total;
+      }
     };
 
     const onPointerDown = (e: PointerEvent) => {
@@ -448,6 +498,7 @@ export default function Canvas({
         if (wsRef.current?.readyState===WebSocket.OPEN)
           wsRef.current.send(JSON.stringify({type:"cursor",x:world.x,y:world.y}));
         currentStrokeRef.current.points.push(world);
+        streamStroke(world);
         requestFrame();
         return;
       }
@@ -473,6 +524,7 @@ export default function Canvas({
       if (wsRef.current?.readyState===WebSocket.OPEN)
         wsRef.current.send(JSON.stringify({type:"cursor",x:world.x,y:world.y}));
       currentStrokeRef.current.points.push(world);
+      streamStroke(world);
       requestFrame();
     };
 

@@ -126,9 +126,17 @@ wss.on("connection", (ws: WebSocket) => {
       return;
     }
 
+    if (data.type === "stroke_update") {
+      rooms.get(roomId)?.forEach((c) => {
+        if (c !== ws && c.readyState === WebSocket.OPEN)
+          c.send(JSON.stringify({ ...data, userId }));
+      });
+      return;
+    }
+
     rooms.get(roomId)?.forEach((c) => {
       if (c !== ws && c.readyState === WebSocket.OPEN)
-        c.send(JSON.stringify(data));
+        c.send(JSON.stringify({ ...data, userId }));
     });
   });
 
