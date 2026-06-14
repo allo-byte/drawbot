@@ -4,16 +4,17 @@ import type { BrushType } from "./components/Canvas";
 import Toolbar from "./components/Toolbar";
 
 function App() {
-  const [color,     setColor    ] = useState("#ffffff");
-  const [brushSize, setBrushSize] = useState(5);
-  const [opacity,   setOpacity  ] = useState(1);
-  const [eraser,    setEraser   ] = useState(false);
-  const [brushType, setBrushType] = useState<BrushType>("pen");
-  const [panMode,   setPanMode  ] = useState(false);
-  const [bgColor,   setBgColor  ] = useState("#111111");
-  const [savePNG,   setSavePNG  ] = useState<() => void>(() => () => {});
-  const [users,     setUsers    ] = useState<string[]>([]);
-  const [username,  setUsername ] = useState(
+  const [color,      setColor     ] = useState("#ffffff");
+  const [brushSize,  setBrushSize ] = useState(5);
+  const [opacity,    setOpacity   ] = useState(1);
+  const [eraser,     setEraser    ] = useState(false);
+  const [brushType,  setBrushType ] = useState<BrushType>("pen");
+  const [panMode,    setPanMode   ] = useState(false);
+  const [bgColor,    setBgColor   ] = useState("#111111");
+  const [canvasSize, setCanvasSize] = useState({ w: 0, h: 0 });
+  const [savePNG,    setSavePNG   ] = useState<() => void>(() => () => {});
+  const [users,      setUsers     ] = useState<string[]>([]);
+  const [username,   setUsername  ] = useState(
     localStorage.getItem("drawbot-name") || "Invitado"
   );
 
@@ -50,6 +51,7 @@ function App() {
           setBgColor(c);
           (Canvas as any)._sendBgColor(c);
         }}
+        onCanvasResize={(w, h) => setCanvasSize({ w, h })}
         savePNG={savePNG}
         users={users}
         username={username}
@@ -68,6 +70,7 @@ function App() {
         brushType={brushType}
         panMode={panMode}
         bgColor={bgColor}
+        canvasSize={canvasSize}
         setUsers={setUsers}
         onReady={(saveFn) => setSavePNG(() => saveFn)}
         onBgColor={(c) => setBgColor(c)}

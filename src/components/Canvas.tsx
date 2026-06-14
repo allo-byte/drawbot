@@ -31,6 +31,7 @@ type Props = {
   panMode: boolean;
   username: string;
   bgColor: string;
+  canvasSize?: { w: number; h: number };
   setUsers?: (users: string[]) => void;
   onReady?: (saveFn: () => void) => void;
   onBgColor?: (color: string) => void;
@@ -52,17 +53,14 @@ function prng(seed: number) {
   return (s >>> 0) / 0xffffffff;
 }
 
-// Tamaño fijo del offscreen — coordenadas mundo
-// Usamos un canvas grande en espacio mundo, sin DPR ni view transform
 const WORLD_W = 4096;
 const WORLD_H = 4096;
 
 export default function Canvas({
   color, brushSize, opacity, eraser, brushType, panMode, username,
-  bgColor, setUsers, onReady, onBgColor,
+  bgColor, canvasSize, setUsers, onReady, onBgColor,
 }: Props) {
   const canvasRef         = useRef<HTMLCanvasElement>(null);
-  // offscreen en coordenadas MUNDO (sin zoom ni pan)
   const offscreenRef      = useRef<HTMLCanvasElement | null>(null);
   const remotePreviewsRef = useRef<Map<string, Stroke>>(new Map());
   const wsRef             = useRef<WebSocket | null>(null);
@@ -80,7 +78,7 @@ export default function Canvas({
   const panModeRef   = useRef(panMode);
   const bgColorRef   = useRef(bgColor);
   const panStartRef      = useRef<{x:number;y:number;vx:number;vy:number} | null>(null);
-  const lastSentPointRef = useRef(0); // índice del último punto enviado en streaming
+  const lastSentPointRef = useRef(0);
   const viewRef      = useRef({ x: 0, y: 0, scale: 1 });
   const touchPointersRef = useRef<Map<number, {x:number;y:number}>>(new Map());
 
@@ -100,7 +98,6 @@ export default function Canvas({
     return { x: (sx - v.x) / v.scale, y: (sy - v.y) / v.scale };
   };
 
-  // ─── Motor de pinceles — dibuja en coordenadas MUNDO ─────────────────────
   const drawStrokeFrom = (ctx: CanvasRenderingContext2D, stroke: Stroke, fromIndex: number) => {
     const pts = stroke.points;
     if (pts.length < 1) return;
@@ -265,12 +262,10 @@ export default function Canvas({
   const drawStroke = (ctx: CanvasRenderingContext2D, stroke: Stroke) =>
     drawStrokeFrom(ctx, stroke, 0);
 
-  // ─── Offscreen en coordenadas MUNDO (sin transform de view) ──────────────
   const flushToOffscreen = () => {
     const off = offscreenRef.current; if (!off) return;
     const ctx = off.getContext("2d"); if (!ctx) return;
     const strokes = strokesRef.current;
-    // Sin ninguna transformación — coordenadas mundo directas
     for (let i = offscreenCountRef.current; i < strokes.length; i++)
       drawStroke(ctx, strokes[i]);
     offscreenCountRef.current = strokes.length;
@@ -287,8 +282,6 @@ export default function Canvas({
     offscreenCountRef.current = strokesRef.current.length;
   };
 
-  // ─── Composite: transforma el offscreen mundo → pantalla con drawImage ───
-  // El zoom es GRATIS porque solo cambia el drawImage, no redibuja strokes
   const compositeNow = () => {
     const canvas = canvasRef.current;
     const off = offscreenRef.current;
@@ -300,23 +293,19 @@ export default function Canvas({
     ctx.setTransform(1,0,0,1,0,0);
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    // Dibujar offscreen mundo con transformación view aplicada
     ctx.save();
     ctx.scale(dpr, dpr);
     ctx.translate(v.x, v.y);
     ctx.scale(v.scale, v.scale);
     ctx.drawImage(off, 0, 0);
 
-    // Stroke activo encima
     if (currentStrokeRef.current)
       drawStroke(ctx, currentStrokeRef.current);
 
-    // Previews remotos (trazos en progreso de otros usuarios)
     remotePreviewsRef.current.forEach((stroke) => {
       if (stroke.points.length > 1) drawStroke(ctx, stroke);
     });
 
-    // Cursores
     cursorsRef.current.forEach((cursor) => {
       ctx.beginPath();
       ctx.fillStyle = "#00ff88";
@@ -336,12 +325,38 @@ export default function Canvas({
     rafRef.current = requestAnimationFrame(compositeNow);
   };
 
-  // zoom/bgColor → solo requestFrame, NO rebuild (el zoom es gratis ahora)
   const redraw = () => { requestFrame(); };
-  // solo bgColor necesita rebuild
   const redrawFull = () => { rebuildOffscreen(); requestFrame(); };
 
   useEffect(() => { redrawFull(); }, [bgColor]);
+
+  // ── Cambio de tamaño de lienzo ──────────────────────────────────────────
+  useEffect(() => {
+    if (!canvasSize || (canvasSize.w === 0 && canvasSize.h === 0)) return;
+    const off = offscreenRef.current;
+    if (!off) return;
+    off.width  = canvasSize.w;
+    off.height = canvasSize.h;
+    const ctx = off.getContext("2d");
+    if (!ctx) return;
+    ctx.fillStyle = bgColorRef.current;
+    ctx.fillRect(0, 0, canvasSize.w, canvasSize.h);
+    strokesRef.current.forEach(s => drawStroke(ctx, s));
+    offscreenCountRef.current = strokesRef.current.length;
+    const canvas = canvasRef.current;
+    if (canvas) {
+      const dpr = window.devicePixelRatio || 1;
+      const vw = canvas.width / dpr;
+      const vh = canvas.height / dpr;
+      const scale = Math.min(vw / canvasSize.w, vh / canvasSize.h, 1) * 0.9;
+      viewRef.current = {
+        x: (vw - canvasSize.w * scale) / 2,
+        y: (vh - canvasSize.h * scale) / 2,
+        scale,
+      };
+    }
+    requestFrame();
+  }, [canvasSize]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -354,7 +369,6 @@ export default function Canvas({
     canvas.style.width  = (window.innerWidth - 52) + "px";
     canvas.style.height = (window.innerHeight - 52) + "px";
 
-    // Offscreen en coordenadas mundo — tamaño fijo grande
     const off = document.createElement("canvas");
     off.width = WORLD_W; off.height = WORLD_H;
     offscreenRef.current = off;
@@ -381,15 +395,12 @@ export default function Canvas({
       }
       if (data.type === "users")  { setUsers?.(data.users||[]); return; }
       if (data.type === "stroke") {
-        // Stroke completo — reemplaza cualquier preview activo de ese userId
         strokesRef.current.push(data.stroke);
-        // Limpiar preview de ese usuario si existía
         remotePreviewsRef.current.delete(data.userId || "");
         flushToOffscreen();
         requestFrame(); return;
       }
       if (data.type === "stroke_update") {
-        // Puntos parciales — actualizar preview del usuario remoto
         const uid = data.userId || "unknown";
         const existing = remotePreviewsRef.current.get(uid);
         if (existing) {
@@ -436,15 +447,13 @@ export default function Canvas({
       lastSentPointRef.current = 0;
     };
 
-    // Enviar puntos nuevos del stroke activo a otros usuarios (streaming)
-    const STREAM_EVERY = 3; // enviar cada N puntos nuevos
+    const STREAM_EVERY = 3;
     const streamStroke = (_world?: {x:number;y:number}) => {
       const stroke = currentStrokeRef.current;
       if (!stroke || wsRef.current?.readyState !== WebSocket.OPEN) return;
       const total = stroke.points.length;
       const sent  = lastSentPointRef.current;
       if (total - sent >= STREAM_EVERY) {
-        // Enviar solo los puntos nuevos como "stroke_update"
         wsRef.current.send(JSON.stringify({
           type:   "stroke_update",
           color:  stroke.color,
@@ -482,7 +491,6 @@ export default function Canvas({
       const pos = { x:e.clientX-rect.left, y:e.clientY-rect.top };
 
       if (e.pointerType==="pen"||e.pointerType==="mouse") {
-        // Modo mano — arrastrar
         if (panModeRef.current && panStartRef.current) {
           const dx = pos.x - panStartRef.current.x;
           const dy = pos.y - panStartRef.current.y;
@@ -515,7 +523,7 @@ export default function Canvas({
           scale:ns,
         };
         lastPinchDist=info.dist; lastPinchMid=info.mid;
-        redraw(); // ← solo requestFrame, no rebuild
+        redraw();
         return;
       }
 
@@ -556,7 +564,7 @@ export default function Canvas({
       const delta=e.deltaY<0?1.12:0.9;
       const ns=Math.min(MAX_SCALE,Math.max(MIN_SCALE,v.scale*delta));
       viewRef.current={ x:mx-(mx-v.x)*(ns/v.scale), y:my-(my-v.y)*(ns/v.scale), scale:ns };
-      redraw(); // ← solo requestFrame, INSTANTÁNEO
+      redraw();
     };
 
     canvas.addEventListener("pointerdown",   onPointerDown);
@@ -566,7 +574,6 @@ export default function Canvas({
     canvas.addEventListener("wheel", onWheel, { passive:false });
 
     const savePNG = () => {
-      // Exportar en coordenadas mundo al tamaño natural
       const link=document.createElement("a");
       link.download=`drawbot-${Date.now()}.png`;
       link.href=(offscreenRef.current as HTMLCanvasElement).toDataURL("image/png");
