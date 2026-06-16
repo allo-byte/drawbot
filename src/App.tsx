@@ -1,9 +1,10 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import Canvas from "./components/Canvas";
-import type { BrushType, CanvasSize } from "./components/Canvas";
+import type { BrushType, CanvasSize, Layer } from "./components/Canvas";
 import Toolbar from "./components/Toolbar";
 import type { Shortcuts } from "./components/Toolbar";
 import { DEFAULT_SHORTCUTS } from "./components/Toolbar";
+import LayerPanel from "./components/LayerPanel";
 
 type Stroke = {
   points: {x:number;y:number}[];
@@ -12,10 +13,17 @@ type Stroke = {
   opacity: number;
   eraser: boolean;
   brushType?: BrushType;
+  layerId?: number;
 };
 
 const MAX_HISTORY       = 50;
 const MAX_COLOR_HISTORY = 8;
+
+let nextLayerId = 2; // 1 ya está usado por la capa inicial
+
+function makeLayer(id: number, name: string): Layer {
+  return { id, name, visible: true, opacity: 1, locked: false };
+}
 
 function App() {
   const [color,      setColorRaw ] = useState("#ffffff");
@@ -31,6 +39,12 @@ function App() {
   const [username,   setUsername ] = useState(
     localStorage.getItem("drawbot-name") || "Invitado"
   );
+
+  // ── Capas ────────────────────────────────────────────────────────────────
+  const [layers, setLayers] = useState<Layer[]>([
+    makeLayer(1, "Capa 1"),
+  ]);
+  const [activeLayerId, setActiveLayerId] = useState(1);
 
   const [colorHistory, setColorHistory] = useState<string[]>(() => {
     try { return JSON.parse(localStorage.getItem("drawbot-colors") || "[]"); }
@@ -50,7 +64,7 @@ function App() {
     localStorage.setItem("drawbot-shortcuts", JSON.stringify(next));
   };
 
-  // ── Undo/Redo con refs para evitar stale closures ────────────────────────
+  // ── Undo/Redo ────────────────────────────────────────────────────────────
   const undoStackRef = useRef<Stroke[][]>([]);
   const redoStackRef = useRef<Stroke[][]>([]);
   const [undoLen, setUndoLen] = useState(0);
@@ -61,11 +75,8 @@ function App() {
     setMyStrokes: (s: Stroke[]) => void;
   } | null>(null);
 
-  const setColor = useCallback((c: string) => {
-    setColorRaw(c);
-  }, []);
+  const setColor = useCallback((c: string) => setColorRaw(c), []);
 
-  // Guardar color al terminar trazo
   const onStrokeFinished = useCallback((strokeColor: string) => {
     if (!strokeColor || strokeColor === "eraser") return;
     setColorHistory(prev => {
@@ -112,7 +123,6 @@ function App() {
     setRedoLen(redoStackRef.current.length);
   }, []);
 
-  // Refs estables para handlers
   const handleUndoRef = useRef(handleUndo);
   const handleRedoRef = useRef(handleRedo);
   const savePNGRef    = useRef(savePNG);
@@ -120,7 +130,7 @@ function App() {
   handleRedoRef.current = handleRedo;
   savePNGRef.current    = savePNG;
 
-  // ── Atajos de teclado ────────────────────────────────────────────────────
+  // ── Atajos teclado ───────────────────────────────────────────────────────
   useEffect(() => {
     const match = (e: KeyboardEvent, shortcut: string) => {
       const parts = shortcut.split("+");
@@ -146,7 +156,6 @@ function App() {
     return () => window.removeEventListener("keydown", handler);
   }, [shortcuts]);
 
-  // ── Gestos táctiles (2 dedos = undo, 3 dedos = redo) ────────────────────
   useEffect(() => {
     const onUndo = () => handleUndoRef.current();
     const onRedo = () => handleRedoRef.current();
@@ -156,6 +165,62 @@ function App() {
       window.removeEventListener("drawbot:undo", onUndo);
       window.removeEventListener("drawbot:redo", onRedo);
     };
+  }, []);
+
+  // ── Layer handlers ───────────────────────────────────────────────────────
+  const pushLayerUpdate = (newLayers: Layer[]) => {
+    setLayers(newLayers);
+    (Canvas as any)._sendLayerUpdate?.(newLayers);
+  };
+
+  const handleAddLayer = () => {
+    const id   = nextLayerId++;
+    const name = `Capa ${id}`;
+    const nl   = [...layers, makeLayer(id, name)];
+    pushLayerUpdate(nl);
+    setActiveLayerId(id);
+  };
+
+  const handleDeleteLayer = (id: number) => {
+    if (layers.length <= 1) return;
+    const nl = layers.filter(l => l.id !== id);
+    pushLayerUpdate(nl);
+    if (activeLayerId === id) setActiveLayerId(nl[nl.length - 1].id);
+  };
+
+  const handleToggleVisibility = (id: number) => {
+    const nl = layers.map(l => l.id===id ? {...l, visible:!l.visible} : l);
+    pushLayerUpdate(nl);
+  };
+
+  const handleToggleLock = (id: number) => {
+    const nl = layers.map(l => l.id===id ? {...l, locked:!l.locked} : l);
+    pushLayerUpdate(nl);
+  };
+
+  const handleRename = (id: number, name: string) => {
+    const nl = layers.map(l => l.id===id ? {...l, name} : l);
+    pushLayerUpdate(nl);
+  };
+
+  const handleReorder = (fromIdx: number, toIdx: number) => {
+    const nl = [...layers];
+    const [moved] = nl.splice(fromIdx, 1);
+    nl.splice(toIdx, 0, moved);
+    pushLayerUpdate(nl);
+  };
+
+  const handleLayerOpacity = (id: number, opacity: number) => {
+    const nl = layers.map(l => l.id===id ? {...l, opacity} : l);
+    pushLayerUpdate(nl);
+  };
+
+  // Capas recibidas desde el servidor (para sincronización colaborativa)
+  const handleLayersUpdate = useCallback((newLayers: Layer[]) => {
+    setLayers(newLayers);
+    // Ajustar nextLayerId para evitar colisiones
+    const maxId = Math.max(...newLayers.map(l => l.id));
+    if (maxId >= nextLayerId) nextLayerId = maxId + 1;
   }, []);
 
   const room = new URLSearchParams(window.location.search).get("room") || "default";
@@ -196,11 +261,26 @@ function App() {
         eraser={eraser} brushType={brushType}
         panMode={panMode} bgColor={bgColor}
         canvasSize={canvasSize}
+        layers={layers}
+        activeLayerId={activeLayerId}
         setUsers={setUsers}
         onReady={(saveFn, _uploadFn) => setSavePNG(() => saveFn)}
         onBgColor={(c) => setBgColor(c)}
         onStrokeAdded={onStrokeAdded}
         onStrokeFinished={onStrokeFinished}
+        onLayersUpdate={handleLayersUpdate}
+      />
+      <LayerPanel
+        layers={layers}
+        activeLayerId={activeLayerId}
+        onSelect={setActiveLayerId}
+        onAdd={handleAddLayer}
+        onDelete={handleDeleteLayer}
+        onToggleVisibility={handleToggleVisibility}
+        onToggleLock={handleToggleLock}
+        onRename={handleRename}
+        onReorder={handleReorder}
+        onOpacity={handleLayerOpacity}
       />
     </>
   );

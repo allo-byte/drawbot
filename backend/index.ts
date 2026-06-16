@@ -5,18 +5,27 @@ import { join, extname } from "path";
 
 type Point = { x: number; y: number };
 type Stroke = {
-  points: Point[];
-  color: string;
-  size: number;
-  opacity: number;
-  eraser: boolean;
+  points:    Point[];
+  color:     string;
+  size:      number;
+  opacity:   number;
+  eraser:    boolean;
+  layerId?:  number;
 };
 
-const port = Number(process.env.PORT) || 3001;
+type Layer = {
+  id:      number;
+  name:    string;
+  visible: boolean;
+  opacity: number;
+  locked:  boolean;
+};
+
+const port     = Number(process.env.PORT) || 3001;
 const distPath = join(process.cwd(), "dist");
 
 console.log(`📁 Serving dist from: ${distPath}`);
-console.log(`🚀 DrawBot running on :${port}`);
+console.log(`🚀 PeonyPaint running on :${port}`);
 
 const mimeTypes: Record<string, string> = {
   ".html": "text/html",
@@ -31,30 +40,30 @@ const mimeTypes: Record<string, string> = {
 };
 
 const httpServer = createServer((req, res) => {
-  let urlPath = req.url?.split("?")[0] || "/";
+  let urlPath  = req.url?.split("?")[0] || "/";
   let filePath = join(distPath, urlPath === "/" ? "index.html" : urlPath);
-
-  if (!existsSync(filePath)) {
-    filePath = join(distPath, "index.html");
-  }
-
+  if (!existsSync(filePath)) filePath = join(distPath, "index.html");
   try {
     const content = readFileSync(filePath);
-    const ext = extname(filePath);
+    const ext     = extname(filePath);
     res.writeHead(200, { "Content-Type": mimeTypes[ext] || "application/octet-stream" });
     res.end(content);
   } catch {
-    res.writeHead(404);
-    res.end("Not found");
+    res.writeHead(404); res.end("Not found");
   }
 });
 
 const wss = new WebSocketServer({ server: httpServer });
 
-const rooms        = new Map<string, Set<WebSocket>>();
-const roomStrokes  = new Map<string, Stroke[]>();
-const roomUsers    = new Map<string, Map<string, string>>();
-const roomBgColor  = new Map<string, string>(); // ← nuevo: color de fondo por sala
+const rooms       = new Map<string, Set<WebSocket>>();
+const roomStrokes = new Map<string, Stroke[]>();
+const roomUsers   = new Map<string, Map<string, string>>();
+const roomBgColor = new Map<string, string>();
+const roomLayers  = new Map<string, Layer[]>();   // ← nuevo
+
+const DEFAULT_LAYERS: Layer[] = [
+  { id:1, name:"Capa 1", visible:true, opacity:1, locked:false },
+];
 
 wss.on("connection", (ws: WebSocket) => {
   let roomId   = "default";
@@ -71,15 +80,16 @@ wss.on("connection", (ws: WebSocket) => {
       if (!rooms.has(roomId))       rooms.set(roomId, new Set());
       if (!roomStrokes.has(roomId)) roomStrokes.set(roomId, []);
       if (!roomUsers.has(roomId))   roomUsers.set(roomId, new Map());
+      if (!roomLayers.has(roomId))  roomLayers.set(roomId, [...DEFAULT_LAYERS.map(l=>({...l}))]);
 
       rooms.get(roomId)!.add(ws);
       roomUsers.get(roomId)!.set(userId, username);
 
-      // Enviar estado inicial incluyendo bgColor si existe
       ws.send(JSON.stringify({
         type:    "init",
         strokes: roomStrokes.get(roomId) || [],
         bgColor: roomBgColor.get(roomId) || null,
+        layers:  roomLayers.get(roomId)  || DEFAULT_LAYERS,
       }));
       ws.send(JSON.stringify({ type: "user", userId: username }));
 
@@ -107,17 +117,27 @@ wss.on("connection", (ws: WebSocket) => {
       return;
     }
 
-    // ── Nuevo: cambio de color de fondo ─────────────────────────────────────
     if (data.type === "bgcolor") {
       roomBgColor.set(roomId, data.color);
-      // Propagar a todos los demás usuarios de la sala
       rooms.get(roomId)?.forEach((c) => {
         if (c !== ws && c.readyState === WebSocket.OPEN)
           c.send(JSON.stringify({ type: "bgcolor", color: data.color }));
       });
       return;
     }
-    // ────────────────────────────────────────────────────────────────────────
+
+    // ── Actualización de capas ────────────────────────────────────────────
+    if (data.type === "layer_update") {
+      const layers = data.layers as Layer[];
+      roomLayers.set(roomId, layers);
+      // Propagar a los demás
+      rooms.get(roomId)?.forEach((c) => {
+        if (c !== ws && c.readyState === WebSocket.OPEN)
+          c.send(JSON.stringify({ type: "layer_update", layers }));
+      });
+      return;
+    }
+    // ─────────────────────────────────────────────────────────────────────
 
     if (data.type === "cursor") {
       rooms.get(roomId)?.forEach((c) => {
@@ -135,15 +155,11 @@ wss.on("connection", (ws: WebSocket) => {
       return;
     }
 
-    // Undo/redo: el usuario envía sus strokes actualizados
-    // El servidor reemplaza sus strokes en el historial de la sala
     if (data.type === "undo_sync") {
       const roomStrokeList = roomStrokes.get(roomId) || [];
-      // Quitar todos los strokes anteriores de este userId y poner los nuevos
       const others = roomStrokeList.filter((s: any) => s._uid !== userId);
       const mine   = (data.strokes || []).map((s: any) => ({ ...s, _uid: userId }));
       roomStrokes.set(roomId, [...others, ...mine]);
-      // Notificar a los demás para que recarguen
       rooms.get(roomId)?.forEach((c) => {
         if (c !== ws && c.readyState === WebSocket.OPEN)
           c.send(JSON.stringify({ type: "reload_strokes", strokes: roomStrokes.get(roomId) }));
