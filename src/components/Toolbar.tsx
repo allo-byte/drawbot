@@ -502,8 +502,8 @@ export default function Toolbar({
           <div className="tb-panel tb-panel-color" style={{ zIndex:1100 }}>
             <div style={{ display:"flex", justifyContent:"center", marginBottom:10 }}>
               <input type="color" value={color} onChange={e => setColor(e.target.value)}
-                style={{ width:80, height:80, border:"none", background:"none",
-                  cursor:"pointer", padding:0, borderRadius:10 }} />
+                style={{ width:"100%", height:120, border:"none", background:"none",
+                  cursor:"pointer", padding:0, borderRadius:10, display:"block" }} />
             </div>
             <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:8 }}>
               <span style={{ color:"#555", fontSize:11 }}>HEX</span>
