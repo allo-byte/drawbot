@@ -1,11 +1,10 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import Canvas from "./components/Canvas";
 import type { BrushType, CanvasSize } from "./components/Canvas";
 import Toolbar from "./components/Toolbar";
 import type { Shortcuts } from "./components/Toolbar";
 import { DEFAULT_SHORTCUTS } from "./components/Toolbar";
 
-// Stroke type para undo/redo
 type Stroke = {
   points: {x:number;y:number}[];
   color: string;
@@ -15,31 +14,29 @@ type Stroke = {
   brushType?: BrushType;
 };
 
-const MAX_HISTORY = 50;
+const MAX_HISTORY       = 50;
 const MAX_COLOR_HISTORY = 8;
 
 function App() {
-  const [color,       setColorRaw   ] = useState("#ffffff");
-  const [brushSize,   setBrushSize  ] = useState(5);
-  const [opacity,     setOpacity    ] = useState(1);
-  const [eraser,      setEraser     ] = useState(false);
-  const [brushType,   setBrushType  ] = useState<BrushType>("pen");
-  const [panMode,     setPanMode    ] = useState(false);
-  const [bgColor,     setBgColor    ] = useState("#111111");
-  const [canvasSize,  setCanvasSize ] = useState<CanvasSize>(null);
-  const [savePNG,     setSavePNG    ] = useState<() => void>(() => () => {});
-  const [users,       setUsers      ] = useState<string[]>([]);
-  const [username,    setUsername   ] = useState(
+  const [color,      setColorRaw ] = useState("#ffffff");
+  const [brushSize,  setBrushSize] = useState(5);
+  const [opacity,    setOpacity  ] = useState(1);
+  const [eraser,     setEraser   ] = useState(false);
+  const [brushType,  setBrushType] = useState<BrushType>("pen");
+  const [panMode,    setPanMode  ] = useState(false);
+  const [bgColor,    setBgColor  ] = useState("#111111");
+  const [canvasSize, setCanvasSize] = useState<CanvasSize>(null);
+  const [savePNG,    setSavePNG  ] = useState<() => void>(() => () => {});
+  const [users,      setUsers    ] = useState<string[]>([]);
+  const [username,   setUsername ] = useState(
     localStorage.getItem("drawbot-name") || "Invitado"
   );
 
-  // Historial de colores
   const [colorHistory, setColorHistory] = useState<string[]>(() => {
     try { return JSON.parse(localStorage.getItem("drawbot-colors") || "[]"); }
     catch { return []; }
   });
 
-  // Atajos configurables
   const [shortcuts, setShortcutsRaw] = useState<Shortcuts>(() => {
     try {
       const saved = localStorage.getItem("drawbot-shortcuts");
@@ -53,55 +50,82 @@ function App() {
     localStorage.setItem("drawbot-shortcuts", JSON.stringify(next));
   };
 
-  // Historial undo/redo por usuario (solo strokes del usuario actual)
-  const [undoStack, setUndoStack] = useState<Stroke[][]>([]);
-  const [redoStack, setRedoStack] = useState<Stroke[][]>([]);
+  // ── Undo/Redo con refs para evitar stale closures ────────────────────────
+  const undoStackRef = useRef<Stroke[][]>([]);
+  const redoStackRef = useRef<Stroke[][]>([]);
+  const [undoLen, setUndoLen] = useState(0);
+  const [redoLen, setRedoLen] = useState(0);
 
-  // Referencia al Canvas para llamar undo/redo
-  const [canvasRef, setCanvasRef] = useState<{
-    undo: () => void;
-    redo: () => void;
+  const canvasApiRef = useRef<{
     getMyStrokes: () => Stroke[];
     setMyStrokes: (s: Stroke[]) => void;
   } | null>(null);
 
-  // Cambiar color y guardar en historial
   const setColor = useCallback((c: string) => {
     setColorRaw(c);
+  }, []);
+
+  // Guardar color al terminar trazo
+  const onStrokeFinished = useCallback((strokeColor: string) => {
+    if (!strokeColor || strokeColor === "eraser") return;
     setColorHistory(prev => {
-      if (prev[0] === c) return prev;
-      const next = [c, ...prev.filter(x => x !== c)].slice(0, MAX_COLOR_HISTORY);
+      if (prev[0] === strokeColor) return prev;
+      const next = [strokeColor, ...prev.filter(x => x !== strokeColor)].slice(0, MAX_COLOR_HISTORY);
       localStorage.setItem("drawbot-colors", JSON.stringify(next));
       return next;
     });
   }, []);
 
-  // Undo
+  const onStrokeAdded = useCallback((
+    getMyStrokes: () => Stroke[],
+    setMyStrokes: (s: Stroke[]) => void
+  ) => {
+    canvasApiRef.current = { getMyStrokes, setMyStrokes };
+    const snapshot = getMyStrokes().slice(0, -1);
+    undoStackRef.current = [...undoStackRef.current.slice(-MAX_HISTORY), snapshot];
+    redoStackRef.current = [];
+    setUndoLen(undoStackRef.current.length);
+    setRedoLen(0);
+  }, []);
+
   const handleUndo = useCallback(() => {
-    if (!canvasRef) return;
-    const myStrokes = canvasRef.getMyStrokes();
-    if (myStrokes.length === 0) return;
-    const newStrokes = myStrokes.slice(0, -1);
-    setUndoStack(prev => [...prev.slice(-MAX_HISTORY), myStrokes]);
-    setRedoStack([]);
-    canvasRef.setMyStrokes(newStrokes);
-  }, [canvasRef]);
+    const api = canvasApiRef.current;
+    if (!api || undoStackRef.current.length === 0) return;
+    const current  = api.getMyStrokes();
+    redoStackRef.current = [...redoStackRef.current, [...current]];
+    const snapshot = undoStackRef.current[undoStackRef.current.length - 1];
+    undoStackRef.current = undoStackRef.current.slice(0, -1);
+    api.setMyStrokes(snapshot);
+    setUndoLen(undoStackRef.current.length);
+    setRedoLen(redoStackRef.current.length);
+  }, []);
 
-  // Redo
   const handleRedo = useCallback(() => {
-    if (!canvasRef || undoStack.length === 0) return;
-    const prev = undoStack[undoStack.length - 1];
-    setUndoStack(s => s.slice(0, -1));
-    setRedoStack(s => [...s, canvasRef.getMyStrokes()]);
-    canvasRef.setMyStrokes(prev);
-  }, [canvasRef, undoStack]);
+    const api = canvasApiRef.current;
+    if (!api || redoStackRef.current.length === 0) return;
+    const current  = api.getMyStrokes();
+    undoStackRef.current = [...undoStackRef.current, [...current]];
+    const snapshot = redoStackRef.current[redoStackRef.current.length - 1];
+    redoStackRef.current = redoStackRef.current.slice(0, -1);
+    api.setMyStrokes(snapshot);
+    setUndoLen(undoStackRef.current.length);
+    setRedoLen(redoStackRef.current.length);
+  }, []);
 
-  // Atajos de teclado globales
+  // Refs estables para handlers
+  const handleUndoRef = useRef(handleUndo);
+  const handleRedoRef = useRef(handleRedo);
+  const savePNGRef    = useRef(savePNG);
+  handleUndoRef.current = handleUndo;
+  handleRedoRef.current = handleRedo;
+  savePNGRef.current    = savePNG;
+
+  // ── Atajos de teclado ────────────────────────────────────────────────────
   useEffect(() => {
     const match = (e: KeyboardEvent, shortcut: string) => {
       const parts = shortcut.split("+");
-      const key = parts[parts.length - 1];
-      const ctrl = parts.includes("ctrl");
+      const key   = parts[parts.length - 1];
+      const ctrl  = parts.includes("ctrl");
       const shift = parts.includes("shift");
       return (
         e.key.toLowerCase() === key &&
@@ -109,22 +133,30 @@ function App() {
         e.shiftKey === shift
       );
     };
-
     const handler = (e: KeyboardEvent) => {
-      // No activar si está escribiendo
       const tag = (e.target as HTMLElement).tagName;
       if (tag === "INPUT" || tag === "TEXTAREA") return;
-
-      if (match(e, shortcuts.undo))   { e.preventDefault(); handleUndo(); }
-      if (match(e, shortcuts.redo))   { e.preventDefault(); handleRedo(); }
-      if (match(e, shortcuts.save))   { e.preventDefault(); savePNG(); }
+      if (match(e, shortcuts.undo))   { e.preventDefault(); handleUndoRef.current(); }
+      if (match(e, shortcuts.redo))   { e.preventDefault(); handleRedoRef.current(); }
+      if (match(e, shortcuts.save))   { e.preventDefault(); savePNGRef.current(); }
       if (match(e, shortcuts.eraser)) { setEraser(v => !v); setPanMode(false); }
       if (match(e, shortcuts.pan))    { setPanMode(v => !v); setEraser(false); }
     };
-
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [shortcuts, handleUndo, handleRedo, savePNG]);
+  }, [shortcuts]);
+
+  // ── Gestos táctiles (2 dedos = undo, 3 dedos = redo) ────────────────────
+  useEffect(() => {
+    const onUndo = () => handleUndoRef.current();
+    const onRedo = () => handleRedoRef.current();
+    window.addEventListener("drawbot:undo", onUndo);
+    window.addEventListener("drawbot:redo", onRedo);
+    return () => {
+      window.removeEventListener("drawbot:undo", onUndo);
+      window.removeEventListener("drawbot:redo", onRedo);
+    };
+  }, []);
 
   const room = new URLSearchParams(window.location.search).get("room") || "default";
 
@@ -151,8 +183,7 @@ function App() {
         colorHistory={colorHistory}
         shortcuts={shortcuts} setShortcuts={setShortcuts}
         onUndo={handleUndo} onRedo={handleRedo}
-        canUndo={undoStack.length > 0 || (canvasRef?.getMyStrokes().length ?? 0) > 0}
-        canRedo={redoStack.length > 0}
+        canUndo={undoLen > 0} canRedo={redoLen > 0}
         bgColor={bgColor}
         setBgColor={(c: string) => { setBgColor(c); (Canvas as any)._sendBgColor(c); }}
         savePNG={savePNG}
@@ -166,19 +197,10 @@ function App() {
         panMode={panMode} bgColor={bgColor}
         canvasSize={canvasSize}
         setUsers={setUsers}
-        onReady={(saveFn) => setSavePNG(() => saveFn)}
+        onReady={(saveFn, _uploadFn) => setSavePNG(() => saveFn)}
         onBgColor={(c) => setBgColor(c)}
-        onStrokeAdded={(getMyStrokes, setMyStrokes) => {
-          setCanvasRef({ 
-            undo: handleUndo, 
-            redo: handleRedo,
-            getMyStrokes,
-            setMyStrokes,
-          });
-          // Guardar estado para undo
-          setUndoStack(prev => [...prev.slice(-MAX_HISTORY), getMyStrokes().slice(0,-1)]);
-          setRedoStack([]);
-        }}
+        onStrokeAdded={onStrokeAdded}
+        onStrokeFinished={onStrokeFinished}
       />
     </>
   );
