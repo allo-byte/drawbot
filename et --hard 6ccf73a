@@ -1,0 +1,46 @@
+[33md5382cb[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m, [m[1;31morigin/main[m[33m)[m Revert "canvas optimizado: stamp cache + throttle + gestos táctiles undo/redo"
+[33m84b7876[m fix: regenerar bun.lock con pg
+[33m96f3494[m PostgreSQL persistente + imágenes + pincel 2000px + gestos táctiles
+[33md7e1cff[m canvas optimizado: stamp cache + throttle + gestos táctiles undo/redo
+[33mae520d8[m fix color history and undo/redo stability
+[33m6ccf73a[m undo/redo + historial colores + atajos configurables
+[33m292a98f[m tamaño de lienzo + presets + personalizado
+[33m116da1e[m add canvas size picker, brush panel and bg color
+[33m64d537e[m streaming trazos + mano + sliders fluidos
+[33m66e08be[m mano + sliders fluidos + tamaño 200
+[33m07ad582[m fix canvas offset + sliders + color panel
+[33m862bd83[m UI estilo Procreate
+[33m53538a7[m zoom instantaneo + quitar acuarela
+[33ma1224b9[m fix nick update
+[33md580e3d[m nick persistente + lista usuarios
+[33m16067db[m fix dist structure
+[33m8e01a98[m fix dist path
+[33m3f26055[m add dist to backend
+[33m6743a0a[m remove build command
+[33mda974d7[m fix build path
+[33m4abc4c7[m add build command
+[33m07205c2[m force new hash
+[33m17b63d2[m revert to pinceles Paint update
+[33m845bf9d[m add fresh dist
+[33me404637[m remove dist
+[33m974cb0f[m redeploy
+[33m0eda777[m optimizar pinceles
+[33m1530bd1[m RAF fluido
+[33m4620ed5[m pinceles Paint update
+[33m54aa2f7[m pinceles Paint + fondo
+[33m3271936[m agregar pinceles Paint y color de fondo
+[33m9d61a5b[m fix mouse drawing and scroll zoom
+[33mb2c95e2[m fix Apple Pencil pointerType
+[33mcb399b9[m fix pinch zoom with PointerEvents
+[33md2aa915[m add pinch zoom and pan
+[33m5a2b242[m fix redraw and dpr
+[33m27ac6b8[m fix dpr for iPad
+[33mfa15ab9[m fix distPath same dir
+[33m1d483a4[m move dist into backend
+[33m597ea52[m fix distPath with process.cwd
+[33m7b6deae[m fix start command
+[33m994cacf[m fix dist path
+[33md60b30a[m include dist, simplify railway
+[33m1b1169d[m fix railway builder
+[33m813a2cf[m deploy setup
+[33m8be3de3[m Primer commit

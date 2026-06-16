@@ -4,7 +4,6 @@ import type { BrushType, CanvasSize } from "./Canvas";
 
 type Setter<T> = Dispatch<SetStateAction<T>> | ((v: T) => void);
 
-// Atajos configurables
 export type Shortcuts = {
   undo: string;
   redo: string;
@@ -205,7 +204,6 @@ function VSlider({ value, min, max, onChange, color = "#7070dd", label }: {
   );
 }
 
-// Formatea atajo para mostrarlo
 function fmtShortcut(s: string) {
   return s.split("+").map(k =>
     k === "ctrl" ? "⌘/Ctrl" : k === "shift" ? "⇧" : k.toUpperCase()
@@ -266,7 +264,6 @@ export default function Toolbar({
 
   const activeBrush = BRUSHES.find(b => b.type === brushType);
 
-  // Capturar tecla para atajo
   const handleCaptureKey = (e: React.KeyboardEvent) => {
     if (!capturingKey) return;
     e.preventDefault();
@@ -346,9 +343,7 @@ export default function Toolbar({
         .tb-panel-color   { top: 60px; left: 60px; width: 300px; }
         .tb-panel-users   { top: 60px; right: 12px; width: 220px; }
         .tb-panel-room    { top: 60px; right: 12px; width: 260px; }
-        .tb-brushgrid {
-          display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px;
-        }
+        .tb-brushgrid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
         .tb-brushbtn {
           display: flex; flex-direction: column; align-items: center;
           gap: 4px; padding: 8px 4px; border-radius: 10px;
@@ -361,13 +356,9 @@ export default function Toolbar({
         .tb-brushbtn.active { border-color: #7070dd; background: #1e1e3a; color: #aaaaff; }
         .tb-brushbtn.active .lbl { color: #9999ee; }
         .tb-brushbtn:hover { background: #222; }
-        .tb-user-item {
-          display: flex; align-items: center; gap: 8px;
-          padding: 6px 8px; border-radius: 8px;
-        }
+        .tb-user-item { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 8px; }
         .tb-user-item:hover { background: #1e1e1e; }
-        .tb-you { font-size: 10px; color: #7070dd; background: #1e1e3a;
-          border-radius: 4px; padding: 1px 5px; }
+        .tb-you { font-size: 10px; color: #7070dd; background: #1e1e3a; border-radius: 4px; padding: 1px 5px; }
         .tb-nick-input {
           background: #1a1a1a; border: 0.5px solid #444; border-radius: 8px;
           color: #ccc; font-size: 13px; padding: 6px 8px; flex: 1; outline: none;
@@ -387,26 +378,16 @@ export default function Toolbar({
         .tb-bg-swatch:hover { transform: scale(1.15); }
         .tb-bg-swatch.sel { border-color: #7070dd; }
         .tb-overlay { position: fixed; inset: 0; z-index: 1050; }
-        .tb-section {
-          font-size: 10px; color: #555; text-transform: uppercase;
-          letter-spacing: .06em; margin-bottom: 8px;
-        }
+        .tb-section { font-size: 10px; color: #555; text-transform: uppercase; letter-spacing: .06em; margin-bottom: 8px; }
         .tb-avatar-stack { display: flex; }
         .tb-avatar-stack > * { margin-left: -5px; }
         .tb-avatar-stack > *:first-child { margin-left: 0; }
-
-        /* Historial de colores */
-        .tb-color-hist {
-          display: flex; gap: 5px; flex-wrap: wrap; margin-top: 8px;
-        }
+        .tb-color-hist { display: flex; gap: 5px; flex-wrap: wrap; margin-top: 8px; }
         .tb-color-hist-swatch {
           width: 24px; height: 24px; border-radius: 6px; cursor: pointer;
-          border: 1.5px solid #333; transition: transform .1s, border-color .1s;
-          flex-shrink: 0;
+          border: 1.5px solid #333; transition: transform .1s, border-color .1s; flex-shrink: 0;
         }
         .tb-color-hist-swatch:hover { transform: scale(1.15); border-color: #aaa; }
-
-        /* Ajustes */
         .tb-shortcut-row {
           display: flex; align-items: center; justify-content: space-between;
           padding: 8px 0; border-bottom: 0.5px solid #1e1e1e;
@@ -419,11 +400,8 @@ export default function Toolbar({
           transition: border-color .12s;
         }
         .tb-key-badge:hover { border-color: #7070dd; color: #aaaaff; }
-        .tb-key-badge.capturing {
-          border-color: #e09a3a; color: #e09a3a; animation: pulse .6s infinite;
-        }
+        .tb-key-badge.capturing { border-color: #e09a3a; color: #e09a3a; animation: pulse .6s infinite; }
         @keyframes pulse { 0%,100% { opacity:1 } 50% { opacity:.5 } }
-
         @media (max-width: 480px) {
           .tb-panel-brushes { left: 52px; transform: none; width: calc(100vw - 64px); }
           .tb-panel-color { left: 52px; width: calc(100vw - 64px); }
@@ -432,19 +410,13 @@ export default function Toolbar({
 
       {/* ═══ BARRA SUPERIOR ═══ */}
       <div className="tb-top" onKeyDown={handleCaptureKey} tabIndex={-1}>
-
         <div style={{ display:"flex", alignItems:"center", gap:6, cursor:"pointer" }}
           onClick={() => { closeAll(); setShowUsers(u=>!u); }}>
           <UserAvatar name={username} size={30} />
         </div>
-
         <div className="tb-sep"/>
-
-        {/* Color */}
         <div className="tb-color-btn" style={{ background: color }}
           onClick={() => { closeAll(); setShowColor(c=>!c); }} />
-
-        {/* Pincel */}
         <div className={`tb-btn${showBrushes ? " active" : ""}`}
           onClick={() => { closeAll(); setShowBrushes(b=>!b); }} title="Pinceles">
           {eraser ? BRUSH_ICONS.eraser : BRUSH_ICONS[brushType]}
@@ -452,81 +424,46 @@ export default function Toolbar({
         <span style={{ color:"#666", fontSize:12, flexShrink:0 }}>
           {eraser ? "Borrador" : (activeBrush?.label ?? "Pincel")}
         </span>
-
         <div className="tb-sep"/>
-
-        {/* Undo */}
-        <div className={`tb-btn${!canUndo ? " " : ""}`}
-          onClick={onUndo} title={`Deshacer (${fmtShortcut(shortcuts.undo)})`}
-          style={{ opacity: canUndo ? 1 : 0.3, fontSize:14 }}>
-          ↩️
-        </div>
-
-        {/* Redo */}
-        <div className={`tb-btn${!canRedo ? " " : ""}`}
-          onClick={onRedo} title={`Rehacer (${fmtShortcut(shortcuts.redo)})`}
-          style={{ opacity: canRedo ? 1 : 0.3, fontSize:14 }}>
-          ↪️
-        </div>
-
+        <div className="tb-btn" onClick={onUndo}
+          title={`Deshacer (${fmtShortcut(shortcuts.undo)})`}
+          style={{ opacity: canUndo ? 1 : 0.3, fontSize:14 }}>↩️</div>
+        <div className="tb-btn" onClick={onRedo}
+          title={`Rehacer (${fmtShortcut(shortcuts.redo)})`}
+          style={{ opacity: canRedo ? 1 : 0.3, fontSize:14 }}>↪️</div>
         <div className="tb-sep"/>
-
-        {/* Mano */}
         <div className={`tb-btn${panMode ? " active" : ""}`}
           onClick={() => { setPanMode(!panMode); if (!panMode) setEraser(false); }}
-          title={`Mover (${fmtShortcut(shortcuts.pan)})`} style={{ fontSize:16 }}>
-          ✋
-        </div>
-
-        {/* Borrador */}
+          title={`Mover (${fmtShortcut(shortcuts.pan)})`} style={{ fontSize:16 }}>✋</div>
         <div className={`tb-btn${eraser && !panMode ? " eraser-active" : ""}`}
           onClick={() => { setEraser(!eraser); setPanMode(false); }}
           title={`Borrador (${fmtShortcut(shortcuts.eraser)})`}>
           {BRUSH_ICONS.eraser}
         </div>
-
         <div style={{ flex:1 }}/>
-
-        {/* Usuarios */}
         <div className="tb-avatar-stack" style={{ cursor:"pointer" }}
           onClick={() => { closeAll(); setShowUsers(u=>!u); }}>
           {users.slice(0,3).map((u,i) => <UserAvatar key={i} name={u} size={26}/>)}
         </div>
         <span style={{ color:"#00ff88", fontSize:12, marginLeft:4 }}>{users.length}</span>
-
         <div className="tb-sep"/>
-
-        {/* Sala */}
         <div className={`tb-btn${showRoom ? " active" : ""}`}
-          onClick={() => { closeAll(); setShowRoom(r=>!r); }} title="Sala" style={{ fontSize:14 }}>
-          🔗
-        </div>
-
-        {/* Lienzo */}
+          onClick={() => { closeAll(); setShowRoom(r=>!r); }} title="Sala" style={{ fontSize:14 }}>🔗</div>
         <div className={`tb-btn${showCanvas ? " active" : ""}`}
           onClick={() => { closeAll(); setShowCanvas(c=>!c); }}
           title="Tamaño del lienzo" style={{ flexDirection:"column" as any, gap:1 }}>
           <span style={{fontSize:10}}>⬜</span>
           <span style={{fontSize:7, color:"#666"}}>px</span>
         </div>
-
-        {/* Guardar */}
         <div className="tb-btn" onClick={savePNG}
-          title={`Guardar PNG (${fmtShortcut(shortcuts.save)})`} style={{ fontSize:14 }}>
-          💾
-        </div>
-
-        {/* Ajustes */}
+          title={`Guardar PNG (${fmtShortcut(shortcuts.save)})`} style={{ fontSize:14 }}>💾</div>
         <div className={`tb-btn${showSettings ? " active" : ""}`}
-          onClick={() => { closeAll(); setShowSettings(s=>!s); }} title="Ajustes" style={{ fontSize:16 }}>
-          ⚙️
-        </div>
-
+          onClick={() => { closeAll(); setShowSettings(s=>!s); }} title="Ajustes" style={{ fontSize:16 }}>⚙️</div>
       </div>
 
       {/* ═══ BARRA IZQUIERDA ═══ */}
       <div className="tb-left">
-        <VSlider value={brushSize} min={1} max={200}
+        <VSlider value={brushSize} min={1} max={2000}
           onChange={v => setBrushSize(v)} color="#7070dd" label="TAM"/>
         <div className="tb-sep-h"/>
         <VSlider value={Math.round(opacity*100)} min={0} max={100}
@@ -563,13 +500,11 @@ export default function Toolbar({
         <>
           <div className="tb-overlay" onClick={() => setShowColor(false)}/>
           <div className="tb-panel tb-panel-color" style={{ zIndex:1100 }}>
-
             <div style={{ display:"flex", justifyContent:"center", marginBottom:10 }}>
               <input type="color" value={color} onChange={e => setColor(e.target.value)}
                 style={{ width:80, height:80, border:"none", background:"none",
                   cursor:"pointer", padding:0, borderRadius:10 }} />
             </div>
-
             <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:8 }}>
               <span style={{ color:"#555", fontSize:11 }}>HEX</span>
               <input value={hex}
@@ -577,7 +512,6 @@ export default function Toolbar({
                 style={{ flex:1, background:"#1a1a1a", border:"0.5px solid #333",
                   borderRadius:6, color:"#ccc", fontSize:13, padding:"5px 8px" }} />
             </div>
-
             <div style={{ display:"flex", gap:6, marginBottom:10 }}>
               {(["r","g","b"] as const).map((ch,i) => (
                 <div key={ch} style={{ flex:1, display:"flex", flexDirection:"column", gap:3 }}>
@@ -593,23 +527,17 @@ export default function Toolbar({
                 </div>
               ))}
             </div>
-
-            {/* Historial de colores */}
             {colorHistory.length > 0 && (
               <div style={{ borderTop:"0.5px solid #2e2e2e", paddingTop:10, marginBottom:10 }}>
                 <div className="tb-section">Recientes</div>
                 <div className="tb-color-hist">
                   {colorHistory.map((c, i) => (
                     <div key={i} className="tb-color-hist-swatch"
-                      style={{ background: c }}
-                      onClick={() => setColor(c)}
-                      title={c} />
+                      style={{ background: c }} onClick={() => setColor(c)} title={c} />
                   ))}
                 </div>
               </div>
             )}
-
-            {/* Fondo */}
             <div style={{ borderTop:"0.5px solid #2e2e2e", paddingTop:10 }}>
               <div className="tb-section">Fondo</div>
               <div style={{ display:"flex", alignItems:"center", gap:6 }}>
@@ -626,7 +554,6 @@ export default function Toolbar({
                 ))}
               </div>
             </div>
-
           </div>
         </>
       )}
@@ -770,7 +697,6 @@ export default function Toolbar({
           </div>
         </>
       )}
-
     </>
   );
 }
