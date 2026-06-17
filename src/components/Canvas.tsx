@@ -135,6 +135,7 @@ export default function Canvas({
 }: Props) {
   const canvasRef         = useRef<HTMLCanvasElement>(null);
   const layerOffscrRef    = useRef<Map<number, HTMLCanvasElement>>(new Map());
+  const layerCtxRef       = useRef<Map<number, CanvasRenderingContext2D>>(new Map());
   const dirtyLayersRef    = useRef<Set<number>>(new Set());
   const remotePreviewsRef = useRef<Map<string, Stroke>>(new Map());
   const wsRef             = useRef<WebSocket | null>(null);
@@ -198,8 +199,16 @@ export default function Canvas({
       const c = document.createElement("canvas");
       c.width = WORLD_W; c.height = WORLD_H;
       layerOffscrRef.current.set(layerId, c);
+      layerCtxRef.current.set(layerId, c.getContext("2d")!);
     }
     return layerOffscrRef.current.get(layerId)!;
+  };
+  const getLayerCtx = (layerId: number): CanvasRenderingContext2D => {
+    if (!layerCtxRef.current.has(layerId)) {
+      const lc = getLayerCanvas(layerId);
+      layerCtxRef.current.set(layerId, lc.getContext("2d")!);
+    }
+    return layerCtxRef.current.get(layerId)!;
   };
 
   // ── drawStrokeFrom ───────────────────────────────────────────────────────
@@ -323,8 +332,8 @@ export default function Canvas({
   const drawStroke = (ctx: CanvasRenderingContext2D, stroke: Stroke) => drawStrokeFrom(ctx, stroke, 0);
 
   const rebuildLayerCanvas = (layerId: number) => {
-    const lc  = getLayerCanvas(layerId);
-    const ctx = lc.getContext("2d")!;
+    getLayerCanvas(layerId); // asegurar que existe
+    const ctx = getLayerCtx(layerId);
     ctx.setTransform(1,0,0,1,0,0);
     ctx.clearRect(0,0,WORLD_W,WORLD_H);
     strokesRef.current.filter(s => (s.layerId ?? -1) === layerId).forEach(s => drawStroke(ctx,s));
@@ -405,8 +414,8 @@ export default function Canvas({
   const redraw       = () => requestFrame();
   const redrawFull   = () => { rebuildAllLayers(); requestFrame(); };
 
-  useEffect(() => { redrawFull(); }, [bgColor]);
-  useEffect(() => { requestFrame(); }, [canvasSize, layers]);
+  // FIX: bgColor solo necesita requestFrame (se dibuja en composite, no en offscreen)
+  useEffect(() => { requestFrame(); }, [bgColor, canvasSize, layers]);
   useEffect(() => {
     const cs = canvasSize; if(!cs) return;
     const canvas = canvasRef.current; if(!canvas) return;
@@ -502,8 +511,7 @@ export default function Canvas({
         const s=data.stroke as Stroke;
         strokesRef.current.push(s);
         remotePreviewsRef.current.delete(data.userId||"");
-        const lc=getLayerCanvas(s.layerId??-1);
-        drawStroke(lc.getContext("2d")!,s);
+        drawStroke(getLayerCtx(s.layerId??-1),s);
         requestFrame(); return;
       }
       if(data.type==="stroke_update") {
@@ -520,13 +528,31 @@ export default function Canvas({
       if(data.type==="clear") {
         strokesRef.current=[];remotePreviewsRef.current.clear();
         imagesRef.current=[];imgCache.clear();
-        layerOffscrRef.current.forEach(lc=>{lc.getContext("2d")!.clearRect(0,0,WORLD_W,WORLD_H);});
+        layerCtxRef.current.forEach(ctx=>ctx.clearRect(0,0,WORLD_W,WORLD_H));
         requestFrame(); return;
       }
       if(data.type==="bgcolor") { onBgColor?.(data.color); return; }
       if(data.type==="reload_strokes") {
         strokesRef.current=data.strokes||[];
         redrawFull(); return;
+      }
+      // FIX #3: undo remoto — solo reconstruir capas del usuario afectado
+      if(data.type==="undo_sync_remote") {
+        const uid = data.userId;
+        const mine = (data.strokes || []).map((s: any) => ({...s, _uid: uid}));
+        // Reemplazar strokes de ese usuario en strokesRef
+        strokesRef.current = [
+          ...strokesRef.current.filter((s: any) => s._uid !== uid),
+          ...mine,
+        ];
+        // Solo reconstruir capas afectadas
+        const affected: number[] = data.affectedLayers || [];
+        if (affected.length) {
+          affected.forEach((id: number) => rebuildLayerCanvas(id));
+        } else {
+          rebuildAllLayers();
+        }
+        requestFrame(); return;
       }
       // Eventos de capas → delegar a App
       if(data.type==="layer_added")   { onLayerEventRef.current?.(data); getLayerCanvas(data.layer.id); requestFrame(); return; }
@@ -677,8 +703,7 @@ export default function Canvas({
       currentStrokeRef.current=null;
       strokesRef.current.push(stroke);
       myStrokesRef.current=[...myStrokesRef.current,stroke];
-      const lc=getLayerCanvas(stroke.layerId??-1);
-      drawStroke(lc.getContext("2d")!,stroke);
+      drawStroke(getLayerCtx(stroke.layerId??-1),stroke);
       if(wsRef.current?.readyState===WebSocket.OPEN)
         wsRef.current.send(JSON.stringify({type:"stroke",stroke}));
       if(!stroke.eraser)onStrokeFinishedRef.current?.(stroke.color);
@@ -687,9 +712,13 @@ export default function Canvas({
         const others=strokesRef.current.filter(s=>!myStrokesRef.current.includes(s));
         myStrokesRef.current=newMine;
         strokesRef.current=[...others,...newMine];
-        redrawFull();
+        // Reconstruir solo capas afectadas por mis strokes
+        const myLayerIds = new Set(newMine.map(s => s.layerId ?? -1));
+        myLayerIds.forEach(id => rebuildLayerCanvas(id));
+        requestFrame();
+        // FIX #2: enviar solo mis strokes, no todos los de la sala
         if(wsRef.current?.readyState===WebSocket.OPEN)
-          wsRef.current.send(JSON.stringify({type:"undo_sync",strokes:strokesRef.current}));
+          wsRef.current.send(JSON.stringify({type:"undo_sync",strokes:newMine}));
       };
       onStrokeAddedRef.current?.(getMyStrokes,setMyStrokes);
       requestFrame();
@@ -838,12 +867,12 @@ export default function Canvas({
     mCtx.restore();
 
     // Reemplazar offscreen de la capa inferior con el resultado
-    const bottomCtx = bottomLc.getContext("2d")!;
+    const bottomCtx = getLayerCtx(bottomId);
     bottomCtx.clearRect(0, 0, WORLD_W, WORLD_H);
     bottomCtx.drawImage(merged, 0, 0);
 
     // Limpiar offscreen de la capa superior
-    topLc.getContext("2d")!.clearRect(0, 0, WORLD_W, WORLD_H);
+    getLayerCtx(topId).clearRect(0, 0, WORLD_W, WORLD_H);
 
     requestFrame();
   };

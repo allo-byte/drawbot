@@ -3,79 +3,64 @@ import { createServer } from "http";
 import { readFileSync, existsSync } from "fs";
 import { join, extname } from "path";
 
-type Point = { x: number; y: number };
-type Stroke = {
-  points:   Point[];
-  color:    string;
-  size:     number;
-  opacity:  number;
-  eraser:   boolean;
-  layerId?: number;
-};
-
-type Layer = {
-  id:        number;
-  name:      string;
-  visible:   boolean;
-  opacity:   number;
-  locked:    boolean;
-  ownerId:   string;   // userId interno
-  ownerName: string;   // nombre visible
-};
+type Point  = { x: number; y: number };
+type Stroke = { points: Point[]; color: string; size: number; opacity: number; eraser: boolean; layerId?: number; _uid?: string; };
+type Layer  = { id: number; name: string; visible: boolean; opacity: number; locked: boolean; ownerId: string; ownerName: string; blendMode?: string; };
 
 const port     = Number(process.env.PORT) || 3001;
 const distPath = join(process.cwd(), "dist");
-
-console.log(`📁 Serving dist from: ${distPath}`);
-console.log(`🚀 PeonyPaint running on :${port}`);
+const MAX_STROKES = 6000; // límite por sala
 
 const mimeTypes: Record<string, string> = {
-  ".html": "text/html",
-  ".js":   "application/javascript",
-  ".css":  "text/css",
-  ".png":  "image/png",
-  ".svg":  "image/svg+xml",
-  ".ico":  "image/x-icon",
-  ".json": "application/json",
-  ".woff": "font/woff",
-  ".woff2":"font/woff2",
+  ".html":"text/html",".js":"application/javascript",".css":"text/css",
+  ".png":"image/png",".svg":"image/svg+xml",".ico":"image/x-icon",
+  ".json":"application/json",".woff":"font/woff",".woff2":"font/woff2",
 };
 
 const httpServer = createServer((req, res) => {
-  let urlPath  = req.url?.split("?")[0] || "/";
-  let filePath = join(distPath, urlPath === "/" ? "index.html" : urlPath);
-  if (!existsSync(filePath)) filePath = join(distPath, "index.html");
+  let p = req.url?.split("?")[0] || "/";
+  let f = join(distPath, p === "/" ? "index.html" : p);
+  if (!existsSync(f)) f = join(distPath, "index.html");
   try {
-    const content = readFileSync(filePath);
-    const ext     = extname(filePath);
+    const ext = extname(f);
     res.writeHead(200, { "Content-Type": mimeTypes[ext] || "application/octet-stream" });
-    res.end(content);
-  } catch {
-    res.writeHead(404); res.end("Not found");
-  }
+    res.end(readFileSync(f));
+  } catch { res.writeHead(404); res.end("Not found"); }
 });
 
 const wss = new WebSocketServer({ server: httpServer });
 
 const rooms       = new Map<string, Set<WebSocket>>();
 const roomStrokes = new Map<string, Stroke[]>();
-const roomUsers   = new Map<string, Map<string, string>>();   // userId → username
+const roomUsers   = new Map<string, Map<string, string>>();
 const roomBgColor = new Map<string, string>();
 const roomLayers  = new Map<string, Layer[]>();
+// Throttle de cursores: userId → último timestamp enviado
+const cursorThrottle = new Map<string, number>();
+const CURSOR_MS = 50; // máx 20 cursores/s por usuario
 
-let globalLayerId = 100; // IDs altos para evitar colisión con cliente
+let globalLayerId = 100;
 
+// FIX #10: serializar UNA vez para broadcast
 function broadcast(roomId: string, sender: WebSocket | null, msg: object) {
+  const str = JSON.stringify(msg);
   rooms.get(roomId)?.forEach(c => {
-    if (c !== sender && c.readyState === WebSocket.OPEN)
-      c.send(JSON.stringify(msg));
+    if (c !== sender && c.readyState === WebSocket.OPEN) c.send(str);
   });
 }
-
 function broadcastAll(roomId: string, msg: object) {
-  rooms.get(roomId)?.forEach(c => {
-    if (c.readyState === WebSocket.OPEN) c.send(JSON.stringify(msg));
-  });
+  const str = JSON.stringify(msg);
+  rooms.get(roomId)?.forEach(c => { if (c.readyState === WebSocket.OPEN) c.send(str); });
+}
+
+function getLayerLimit(canvasW: number, canvasH: number): number {
+  const px = canvasW * canvasH;
+  if (px === 0)          return 12;
+  if (px <= 1920*1080)   return 10;
+  if (px <= 2048*2048)   return 8;
+  if (px <= 2480*3508)   return 6;
+  if (px <= 3840*2160)   return 4;
+  return 2;
 }
 
 wss.on("connection", (ws: WebSocket) => {
@@ -83,19 +68,15 @@ wss.on("connection", (ws: WebSocket) => {
   let username = "Invitado";
   const userId = Math.random().toString(36).substring(2, 9);
 
-  ws.on("message", (message: Buffer) => {
-    const data = JSON.parse(message.toString());
+  ws.on("message", (raw: Buffer) => {
+    let data: any;
+    try { data = JSON.parse(raw.toString()); } catch { return; }
 
-    // ── PING (keepalive) ────────────────────────────────────────────────────
-    if (data.type === "ping") {
-      ws.send(JSON.stringify({ type: "pong" }));
-      return;
-    }
+    if (data.type === "ping") { ws.send('{"type":"pong"}'); return; }
 
-    // ── JOIN ────────────────────────────────────────────────────────────────
     if (data.type === "join") {
-      username = data.username || "Invitado";
-      roomId   = data.room;
+      username = (data.username || "Invitado").slice(0, 24);
+      roomId   = data.room || "default";
 
       if (!rooms.has(roomId))       rooms.set(roomId, new Set());
       if (!roomStrokes.has(roomId)) roomStrokes.set(roomId, []);
@@ -105,180 +86,151 @@ wss.on("connection", (ws: WebSocket) => {
       rooms.get(roomId)!.add(ws);
       roomUsers.get(roomId)!.set(userId, username);
 
-      // Crear capa inicial para este usuario si no tiene ninguna
       const layers  = roomLayers.get(roomId)!;
       const myLayer = layers.find(l => l.ownerId === userId);
       if (!myLayer) {
-        const newLayer: Layer = {
-          id:        ++globalLayerId,
-          name:      "Capa 1",
-          visible:   true,
-          opacity:   1,
-          locked:    false,
-          ownerId:   userId,
-          ownerName: username,
-        };
-        layers.push(newLayer);
-        // Notificar a los demás que hay una capa nueva
-        broadcast(roomId, ws, { type: "layer_added", layer: newLayer });
+        const nl: Layer = { id: ++globalLayerId, name: "Capa 1", visible: true, opacity: 1, locked: false, ownerId: userId, ownerName: username };
+        layers.push(nl);
+        broadcast(roomId, ws, { type: "layer_added", layer: nl });
       }
 
-      // Enviar estado completo al nuevo usuario
       ws.send(JSON.stringify({
-        type:     "init",
+        type: "init",
         strokes:  roomStrokes.get(roomId) || [],
         bgColor:  roomBgColor.get(roomId) || null,
         layers:   roomLayers.get(roomId)  || [],
         myUserId: userId,
       }));
-      ws.send(JSON.stringify({ type: "user", userId: username }));
 
       const users = Array.from(roomUsers.get(roomId)!.values());
       broadcastAll(roomId, { type: "users", users });
-
       console.log(`👤 ${username}(${userId}) joined ${roomId}`);
       return;
     }
 
-    // ── RENAME (cambio de nombre sin reconectar) ────────────────────────────
     if (data.type === "rename") {
-      const newName = (data.username || "Invitado").slice(0, 24);
-      username = newName;
-      roomUsers.get(roomId)?.set(userId, newName);
-      // Actualizar ownerName en las capas de este usuario
+      const name = (data.username || "Invitado").slice(0, 24);
+      username = name;
+      roomUsers.get(roomId)?.set(userId, name);
       const layers = roomLayers.get(roomId);
-      if (layers) {
-        layers.forEach(l => { if (l.ownerId === userId) l.ownerName = newName; });
-      }
-      // Notificar a todos la lista actualizada
+      if (layers) layers.forEach(l => { if (l.ownerId === userId) l.ownerName = name; });
       const users = Array.from(roomUsers.get(roomId)?.values() || []);
       broadcastAll(roomId, { type: "users", users });
-      // Notificar capas actualizadas
-      broadcast(roomId, ws, { type: "layer_update", layers: layers?.filter(l=>l.ownerId===userId)||[], ownerId: userId });
+      const myLayers = layers?.filter(l => l.ownerId === userId) || [];
+      if (myLayers.length) broadcast(roomId, ws, { type: "layer_update", layers: myLayers, ownerId: userId });
       return;
     }
 
-    // ── STROKE ──────────────────────────────────────────────────────────────
     if (data.type === "stroke") {
       const stroke = { ...data.stroke, _uid: userId };
-      roomStrokes.get(roomId)?.push(stroke);
+      const list = roomStrokes.get(roomId)!;
+      list.push(stroke);
+      // FIX #11: bake automático si se supera el límite
+      if (list.length > MAX_STROKES) {
+        const keep = Math.floor(MAX_STROKES * 0.8);
+        roomStrokes.set(roomId, list.slice(list.length - keep));
+      }
       broadcast(roomId, ws, { type: "stroke", stroke: data.stroke, userId });
       return;
     }
 
-    // ── STROKE STREAMING ────────────────────────────────────────────────────
     if (data.type === "stroke_update") {
       broadcast(roomId, ws, { ...data, userId });
       return;
     }
 
-    // ── CLEAR ───────────────────────────────────────────────────────────────
     if (data.type === "clear") {
       roomStrokes.set(roomId, []);
       broadcastAll(roomId, { type: "clear" });
       return;
     }
 
-    // ── BGCOLOR ─────────────────────────────────────────────────────────────
     if (data.type === "bgcolor") {
       roomBgColor.set(roomId, data.color);
       broadcast(roomId, ws, { type: "bgcolor", color: data.color });
       return;
     }
 
-    // ── CURSOR ──────────────────────────────────────────────────────────────
+    // FIX #12: throttle de cursores en servidor
     if (data.type === "cursor") {
+      const key  = `${roomId}:${userId}`;
+      const now  = Date.now();
+      const last = cursorThrottle.get(key) || 0;
+      if (now - last < CURSOR_MS) return;
+      cursorThrottle.set(key, now);
       broadcast(roomId, ws, { type: "cursor", x: data.x, y: data.y, userId, username });
       return;
     }
 
-    // ── UNDO SYNC ───────────────────────────────────────────────────────────
+    // FIX #2 y #9: undo_sync solo envía strokes PROPIOS, reconstruye solo capas afectadas
     if (data.type === "undo_sync") {
       const list   = roomStrokes.get(roomId) || [];
       const others = list.filter((s: any) => s._uid !== userId);
       const mine   = (data.strokes || []).map((s: any) => ({ ...s, _uid: userId }));
       roomStrokes.set(roomId, [...others, ...mine]);
-      broadcast(roomId, ws, { type: "reload_strokes", strokes: roomStrokes.get(roomId) });
+      // Solo enviar los strokes del userId que hizo undo, con las capas afectadas
+      const affectedLayers = [...new Set(mine.map((s: any) => s.layerId).filter(Boolean))];
+      broadcast(roomId, ws, { type: "undo_sync_remote", strokes: mine, userId, affectedLayers });
       return;
     }
 
-    // ── LAYER: añadir capa propia ────────────────────────────────────────────
     if (data.type === "layer_add") {
       const layers   = roomLayers.get(roomId)!;
       const myLayers = layers.filter(l => l.ownerId === userId);
-      // Límite dinámico por tamaño de lienzo (se envía en el mensaje)
-      const canvasPx = data.canvasW && data.canvasH ? data.canvasW * data.canvasH : 0;
-      const limit =
-        canvasPx === 0         ? 12 :
-        canvasPx <= 1920*1080  ? 10 :
-        canvasPx <= 2048*2048  ? 8  :
-        canvasPx <= 2480*3508  ? 6  :
-        canvasPx <= 3840*2160  ? 4  : 2;
-      if (myLayers.length >= limit) {
-        ws.send(JSON.stringify({ type:"layer_limit_reached", limit }));
-        return;
-      }
-      const newLayer: Layer = {
-        id:        ++globalLayerId,
-        name:      data.name || `Capa ${layers.filter(l=>l.ownerId===userId).length+1}`,
-        visible:   true,
-        opacity:   1,
-        locked:    false,
-        ownerId:   userId,
-        ownerName: username,
+      const limit    = getLayerLimit(data.canvasW || 0, data.canvasH || 0);
+      if (myLayers.length >= limit) { ws.send(JSON.stringify({ type: "layer_limit_reached", limit })); return; }
+      const nl: Layer = {
+        id: ++globalLayerId,
+        name: (data.name || `Capa ${myLayers.length + 1}`).slice(0, 32),
+        visible: true, opacity: 1, locked: false,
+        ownerId: userId, ownerName: username,
       };
-      layers.push(newLayer);
-      broadcastAll(roomId, { type: "layer_added", layer: newLayer });
+      layers.push(nl);
+      broadcastAll(roomId, { type: "layer_added", layer: nl });
       return;
     }
 
-    // ── LAYER: actualizar capas propias ──────────────────────────────────────
     if (data.type === "layer_update") {
       const layers   = roomLayers.get(roomId)!;
       const incoming = (data.layers as Layer[]).filter(l => l.ownerId === userId);
-      // Reemplazar solo las capas de este usuario
       const others   = layers.filter(l => l.ownerId !== userId);
-      const updated  = [...others, ...incoming];
-      roomLayers.set(roomId, updated);
+      roomLayers.set(roomId, [...others, ...incoming]);
       broadcast(roomId, ws, { type: "layer_update", layers: incoming, ownerId: userId });
       return;
     }
 
-    // ── LAYER: eliminar capa propia ──────────────────────────────────────────
     if (data.type === "layer_delete") {
-      const layers = roomLayers.get(roomId)!;
+      const layers   = roomLayers.get(roomId)!;
       const myLayers = layers.filter(l => l.ownerId === userId);
-      if (myLayers.length <= 1) return; // mínimo 1 capa
-      const updated = layers.filter(l => l.id !== data.layerId || l.ownerId !== userId);
-      roomLayers.set(roomId, updated);
+      if (myLayers.length <= 1) return;
+      roomLayers.set(roomId, layers.filter(l => l.id !== data.layerId || l.ownerId !== userId));
       broadcastAll(roomId, { type: "layer_deleted", layerId: data.layerId });
       return;
     }
 
-    // ── LAYER: reordenar capas propias ───────────────────────────────────────
     if (data.type === "layer_reorder") {
-      const layers  = roomLayers.get(roomId)!;
-      const others  = layers.filter(l => l.ownerId !== userId);
-      const mine    = layers.filter(l => l.ownerId === userId);
+      const layers = roomLayers.get(roomId)!;
+      const others = layers.filter(l => l.ownerId !== userId);
+      const mine   = layers.filter(l => l.ownerId === userId);
       const { fromIdx, toIdx } = data;
       if (fromIdx < 0 || toIdx < 0 || fromIdx >= mine.length || toIdx >= mine.length) return;
-      const reordered = [...mine];
-      const [moved]   = reordered.splice(fromIdx, 1);
-      if (!moved) return;
-      reordered.splice(toIdx, 0, moved);
-      roomLayers.set(roomId, [...others, ...reordered]);
-      broadcast(roomId, ws, { type: "layer_reorder", ownerId: userId, order: reordered.map(l=>l.id) });
+      const r = [...mine];
+      const [m] = r.splice(fromIdx, 1);
+      if (!m) return;
+      r.splice(toIdx, 0, m);
+      roomLayers.set(roomId, [...others, ...r]);
+      broadcast(roomId, ws, { type: "layer_reorder", ownerId: userId, order: r.map(l => l.id) });
       return;
     }
 
-    // Fallback broadcast
+    // fallback
     broadcast(roomId, ws, { ...data, userId });
   });
 
   ws.on("close", () => {
     rooms.get(roomId)?.delete(ws);
     roomUsers.get(roomId)?.delete(userId);
-    // NO eliminamos las capas del usuario — sus trazos deben seguir visibles
+    cursorThrottle.delete(`${roomId}:${userId}`);
     const users = Array.from(roomUsers.get(roomId)?.values() || []);
     broadcastAll(roomId, { type: "users", users });
     console.log(`👋 ${username} left ${roomId}`);
@@ -286,3 +238,4 @@ wss.on("connection", (ws: WebSocket) => {
 });
 
 httpServer.listen(port);
+console.log(`🚀 PeonyPaint :${port}`);
