@@ -55,6 +55,7 @@ type Props = {
   onStrokeAdded?: (get: () => Stroke[], set: (s: Stroke[]) => void) => void;
   onStrokeFinished?: (color: string) => void;
   onLayerEvent?: (event: LayerEvent) => void;
+  onConnectionChange?: (status: "connected"|"disconnected"|"reconnecting") => void;
 };
 
 // ── utils ─────────────────────────────────────────────────────────────────
@@ -97,6 +98,7 @@ export default function Canvas({
   color, brushSize, opacity, eraser, brushType, panMode, username,
   bgColor, canvasSize, layers, activeLayerId,
   setUsers, onReady, onBgColor, onStrokeAdded, onStrokeFinished, onLayerEvent,
+  onConnectionChange,
 }: Props) {
   const canvasRef         = useRef<HTMLCanvasElement>(null);
   const layerOffscrRef    = useRef<Map<number, HTMLCanvasElement>>(new Map());
@@ -130,7 +132,8 @@ export default function Canvas({
 
   const onStrokeAddedRef    = useRef(onStrokeAdded);
   const onStrokeFinishedRef = useRef(onStrokeFinished);
-  const onLayerEventRef     = useRef(onLayerEvent);
+  const onLayerEventRef        = useRef(onLayerEvent);
+  const onConnectionChangeRef  = useRef(onConnectionChange);
 
   colorRef.current      = color;
   sizeRef.current       = brushSize;
@@ -144,7 +147,8 @@ export default function Canvas({
   activeLayerRef.current = activeLayerId;
   onStrokeAddedRef.current    = onStrokeAdded;
   onStrokeFinishedRef.current = onStrokeFinished;
-  onLayerEventRef.current     = onLayerEvent;
+  onLayerEventRef.current        = onLayerEvent;
+  onConnectionChangeRef.current  = onConnectionChange;
 
   const MIN_SCALE = 0.05, MAX_SCALE = 10;
   const GESTURE_MS = 350, GESTURE_PX = 12;
@@ -395,19 +399,30 @@ export default function Canvas({
     let reconnectDelay = 1000;
     let intentionalClose = false;
 
+    let pingInterval: ReturnType<typeof setInterval> | null = null;
+
     const connectWS = () => {
       if (intentionalClose) return;
+      onConnectionChangeRef.current?.("reconnecting");
       const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
 
       ws.onopen = () => {
-        reconnectDelay = 1000; // reset backoff
+        reconnectDelay = 1000;
+        onConnectionChangeRef.current?.("connected");
         ws.send(JSON.stringify({type:"join", room, username: usernameRef.current}));
+        // Ping cada 20s para mantener viva la conexión en Render free tier
+        if (pingInterval) clearInterval(pingInterval);
+        pingInterval = setInterval(() => {
+          if (ws.readyState === WebSocket.OPEN)
+            ws.send(JSON.stringify({type:"ping"}));
+        }, 20000);
       };
 
       ws.onclose = () => {
         if (intentionalClose) return;
-        // Reconectar con backoff exponencial (máx 10s)
+        if (pingInterval) { clearInterval(pingInterval); pingInterval = null; }
+        onConnectionChangeRef.current?.("disconnected");
         reconnectTimer = setTimeout(() => {
           reconnectDelay = Math.min(reconnectDelay * 1.5, 10000);
           connectWS();
@@ -415,7 +430,6 @@ export default function Canvas({
       };
 
       ws.onerror = () => ws.close();
-
       ws.onmessage = handleMessage;
     };
 
@@ -444,6 +458,7 @@ export default function Canvas({
         }
         return;
       }
+      if(data.type==="pong")   { return; } // keepalive
       if(data.type==="users")  { setUsers?.(data.users||[]); return; }
       if(data.type==="stroke") {
         const s=data.stroke as Stroke;
@@ -754,11 +769,17 @@ export default function Canvas({
       }
       intentionalClose = true;
       if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (pingInterval) clearInterval(pingInterval);
       wsRef.current?.close();
     };
   },[]);
 
   // Exponer helpers al padre via estáticos
+  (Canvas as any)._rename = (name: string) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN)
+      wsRef.current.send(JSON.stringify({type:"rename", username: name}));
+  };
+
   (Canvas as any)._sendBgColor = (color:string) => {
     if(wsRef.current?.readyState===WebSocket.OPEN)
       wsRef.current.send(JSON.stringify({type:"bgcolor",color}));

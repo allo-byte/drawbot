@@ -86,6 +86,12 @@ wss.on("connection", (ws: WebSocket) => {
   ws.on("message", (message: Buffer) => {
     const data = JSON.parse(message.toString());
 
+    // ── PING (keepalive) ────────────────────────────────────────────────────
+    if (data.type === "ping") {
+      ws.send(JSON.stringify({ type: "pong" }));
+      return;
+    }
+
     // ── JOIN ────────────────────────────────────────────────────────────────
     if (data.type === "join") {
       username = data.username || "Invitado";
@@ -131,6 +137,24 @@ wss.on("connection", (ws: WebSocket) => {
       broadcastAll(roomId, { type: "users", users });
 
       console.log(`👤 ${username}(${userId}) joined ${roomId}`);
+      return;
+    }
+
+    // ── RENAME (cambio de nombre sin reconectar) ────────────────────────────
+    if (data.type === "rename") {
+      const newName = (data.username || "Invitado").slice(0, 24);
+      username = newName;
+      roomUsers.get(roomId)?.set(userId, newName);
+      // Actualizar ownerName en las capas de este usuario
+      const layers = roomLayers.get(roomId);
+      if (layers) {
+        layers.forEach(l => { if (l.ownerId === userId) l.ownerName = newName; });
+      }
+      // Notificar a todos la lista actualizada
+      const users = Array.from(roomUsers.get(roomId)?.values() || []);
+      broadcastAll(roomId, { type: "users", users });
+      // Notificar capas actualizadas
+      broadcast(roomId, ws, { type: "layer_update", layers: layers?.filter(l=>l.ownerId===userId)||[], ownerId: userId });
       return;
     }
 
@@ -227,7 +251,8 @@ wss.on("connection", (ws: WebSocket) => {
       if (fromIdx < 0 || toIdx < 0 || fromIdx >= mine.length || toIdx >= mine.length) return;
       const reordered = [...mine];
       const [moved]   = reordered.splice(fromIdx, 1);
-      reordered.splice(toIdx, 0, moved!);
+      if (!moved) return;
+      reordered.splice(toIdx, 0, moved);
       roomLayers.set(roomId, [...others, ...reordered]);
       broadcast(roomId, ws, { type: "layer_reorder", ownerId: userId, order: reordered.map(l=>l.id) });
       return;

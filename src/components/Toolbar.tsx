@@ -51,6 +51,7 @@ type Props = {
   username: string;
   profile?: Profile;
   onShowProfile?: () => void;
+  connStatus?: "connected"|"disconnected"|"reconnecting";
   room: string;
   createRoom: () => void;
   copyRoomLink: () => void;
@@ -221,7 +222,7 @@ export default function Toolbar({
   colorHistory, shortcuts, setShortcuts,
   onUndo, onRedo, canUndo, canRedo,
   savePNG, users, username,
-  profile, onShowProfile,
+  profile, onShowProfile, connStatus,
   room, createRoom, copyRoomLink,
 }: Props) {
   const [showBrushes,  setShowBrushes ] = useState(false);
@@ -461,6 +462,21 @@ export default function Toolbar({
           {users.slice(0,3).map((u,i) => <RemoteAvatar key={i} username={u} size={26}/>)}
         </div>
         <span style={{ color:"#00ff88", fontSize:12, marginLeft:4 }}>{users.length}</span>
+
+        {/* Indicador de conexión */}
+        <div title={
+          connStatus==="connected" ? "Conectado" :
+          connStatus==="reconnecting" ? "Reconectando..." : "Sin conexión"
+        } style={{
+          width:8, height:8, borderRadius:"50%", flexShrink:0,
+          background:
+            connStatus==="connected"    ? "#00ff88" :
+            connStatus==="reconnecting" ? "#e09a3a" : "#e05d5d",
+          boxShadow:
+            connStatus==="connected"    ? "0 0 6px #00ff8866" :
+            connStatus==="reconnecting" ? "0 0 6px #e09a3a66" : "0 0 6px #e05d5d66",
+          animation: connStatus==="reconnecting" ? "pulse .8s infinite" : "none",
+        }}/>
 
         <div className="tb-sep"/>
 

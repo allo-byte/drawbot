@@ -35,9 +35,12 @@ function App() {
   const handleSaveProfile = (p: Profile) => {
     setProfileRaw(p);
     saveProfile(p);
-    // Reload para que el WS rejoín con el nuevo nombre
-    window.location.reload();
+    // Cambiar nombre en tiempo real sin reconectar
+    if (p.username !== profile.username)
+      (Canvas as any)._rename?.(p.username);
   };
+
+  const [connStatus, setConnStatus] = useState<"connected"|"disconnected"|"reconnecting">("reconnecting");
 
   // ── Capas ────────────────────────────────────────────────────────────────
   const [layers,        setLayers       ] = useState<Layer[]>([]);
@@ -302,6 +305,7 @@ function App() {
         users={users} username={username}
         profile={profile}
         onShowProfile={() => setShowProfile(true)}
+        connStatus={connStatus}
         room={room} createRoom={createRoom} copyRoomLink={copyRoomLink}
       />
       {showProfile && (
@@ -326,6 +330,7 @@ function App() {
         onStrokeAdded={onStrokeAdded}
         onStrokeFinished={onStrokeFinished}
         onLayerEvent={handleLayerEvent}
+        onConnectionChange={setConnStatus}
       />
       {myUserId && (
         <LayerPanel
