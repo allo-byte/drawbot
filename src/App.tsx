@@ -35,7 +35,12 @@ function App() {
   const [brushType,   setBrushType ] = useState<BrushType>("pen");
   const [panMode,     setPanMode   ] = useState(false);
   const [bgColor,     setBgColor   ] = useState("#111111");
-  const [canvasSize,  setCanvasSize] = useState<CanvasSize>(null);
+
+  // ── FIX LIENZO: arranca con 1024×768 en vez de lienzo libre (null) ────────
+  // 1024×768 es ligero (~0.8 Mpx vs 8 Mpx del iPad real),
+  // el usuario puede cambiar a cualquier otro tamaño desde el selector de la toolbar
+  const [canvasSize,  setCanvasSize] = useState<CanvasSize>({ w: 1024, h: 768 });
+
   const [savePNG,     setSavePNG   ] = useState<() => void>(() => () => {});
   const [users,       setUsers     ] = useState<string[]>([]);
   const [profile,     setProfileRaw] = useState<Profile>(getStoredProfile);
@@ -44,7 +49,6 @@ function App() {
   const [layers,      setLayers    ] = useState<Layer[]>([]);
   const [activeLayerId, setActiveLayerId] = useState<number>(-1);
 
-  // FIX #13: myUserId en ref para evitar re-creates de callbacks
   const myUserIdRef = useRef<string>("");
   const [myUserId,  setMyUserId] = useState<string>("");
 
@@ -148,7 +152,6 @@ function App() {
   }, []);
 
   // ── Layer handlers ───────────────────────────────────────────────────────
-  // FIX #14: useMemo para myLayers
   const myLayers   = useMemo(() => layers.filter(l => l.ownerId === myUserId), [layers, myUserId]);
   const layerLimit = useMemo(() => getLayerLimit(canvasSize), [canvasSize]);
 
@@ -227,7 +230,6 @@ function App() {
     (Canvas as any)._sendWS?.({ type: "layer_update", layers: updated.filter(l => l.ownerId===uid) });
   }, [layers]);
 
-  // FIX #13: handleLayerEvent sin dependencia de myUserId via ref
   const handleLayerEvent = useCallback((event: {
     type: string; layers?: Layer[]; layer?: Layer;
     layerId?: number; myUserId?: string; ownerId?: string; order?: number[];
@@ -266,7 +268,7 @@ function App() {
         return [...others, ...reordered];
       });
     }
-  }, []); // sin dependencias — usa ref para myUserId
+  }, []);
 
   const handleSaveProfile = useCallback((p: Profile) => {
     setProfileRaw(p);
