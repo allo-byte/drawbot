@@ -5,6 +5,8 @@ import Toolbar from "./components/Toolbar";
 import type { Shortcuts } from "./components/Toolbar";
 import { DEFAULT_SHORTCUTS } from "./components/Toolbar";
 import LayerPanel from "./components/LayerPanel";
+import ProfilePanel, { getStoredProfile, saveProfile } from "./components/ProfilePanel";
+import type { Profile } from "./components/ProfilePanel";
 
 type Stroke = {
   points: {x:number;y:number}[];
@@ -25,10 +27,17 @@ function App() {
   const [bgColor,    setBgColor  ] = useState("#111111");
   const [canvasSize, setCanvasSize] = useState<CanvasSize>(null);
   const [savePNG,    setSavePNG  ] = useState<() => void>(() => () => {});
-  const [users,      setUsers    ] = useState<string[]>([]);
-  const [username,   setUsername ] = useState(
-    localStorage.getItem("drawbot-name") || "Invitado"
-  );
+  const [users,        setUsers      ] = useState<string[]>([]);
+  const [profile,      setProfileRaw ] = useState<Profile>(getStoredProfile);
+  const [showProfile,  setShowProfile] = useState(false);
+  const username = profile.username;
+
+  const handleSaveProfile = (p: Profile) => {
+    setProfileRaw(p);
+    saveProfile(p);
+    // Reload para que el WS rejoín con el nuevo nombre
+    window.location.reload();
+  };
 
   // ── Capas ────────────────────────────────────────────────────────────────
   const [layers,        setLayers       ] = useState<Layer[]>([]);
@@ -290,9 +299,19 @@ function App() {
         bgColor={bgColor}
         setBgColor={(c: string) => { setBgColor(c); (Canvas as any)._sendBgColor?.(c); }}
         savePNG={savePNG}
-        users={users} username={username} setUsername={setUsername}
+        users={users} username={username}
+        profile={profile}
+        onShowProfile={() => setShowProfile(true)}
         room={room} createRoom={createRoom} copyRoomLink={copyRoomLink}
       />
+      {showProfile && (
+        <ProfilePanel
+          profile={profile}
+          users={users}
+          onSave={handleSaveProfile}
+          onClose={() => setShowProfile(false)}
+        />
+      )}
       <Canvas
         color={color} username={username}
         brushSize={brushSize} opacity={opacity}

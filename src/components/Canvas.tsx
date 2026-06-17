@@ -389,13 +389,40 @@ export default function Canvas({
     const room     = new URLSearchParams(window.location.search).get("room")||"default";
     const protocol = window.location.protocol==="https:"?"wss:":"ws:";
     const wsUrl    = (import.meta as any).env?.VITE_WS_URL||`${protocol}//${window.location.host}`;
-    wsRef.current  = new WebSocket(wsUrl);
 
-    wsRef.current.onopen = () => {
-      wsRef.current?.send(JSON.stringify({type:"join",room,username}));
+    // ── Auto-reconnect WS ──────────────────────────────────────────────────
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let reconnectDelay = 1000;
+    let intentionalClose = false;
+
+    const connectWS = () => {
+      if (intentionalClose) return;
+      const ws = new WebSocket(wsUrl);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        reconnectDelay = 1000; // reset backoff
+        ws.send(JSON.stringify({type:"join", room, username: usernameRef.current}));
+      };
+
+      ws.onclose = () => {
+        if (intentionalClose) return;
+        // Reconectar con backoff exponencial (máx 10s)
+        reconnectTimer = setTimeout(() => {
+          reconnectDelay = Math.min(reconnectDelay * 1.5, 10000);
+          connectWS();
+        }, reconnectDelay);
+      };
+
+      ws.onerror = () => ws.close();
+
+      ws.onmessage = handleMessage;
     };
 
-    wsRef.current.onmessage = (event) => {
+    // Ref para username actualizable sin reconectar
+    const usernameRef = { current: username };
+
+    const handleMessage = (event: MessageEvent) => {
       const data = JSON.parse(event.data);
 
       if (data.type==="init") {
@@ -469,6 +496,8 @@ export default function Canvas({
         requestFrame();
       }
     };
+
+    connectWS();
 
     let lastPinchDist=0, lastPinchMid={x:0,y:0};
     const getPinchInfo=()=>{
@@ -714,7 +743,6 @@ export default function Canvas({
 
     return ()=>{
       if(rafRef.current)cancelAnimationFrame(rafRef.current);
-      wsRef.current?.close();
       canvas.removeEventListener("pointerdown",  onPointerDown);
       canvas.removeEventListener("pointermove",  onPointerMove);
       canvas.removeEventListener("pointerup",    onPointerUp);
@@ -724,6 +752,9 @@ export default function Canvas({
       if ((window as any).visualViewport) {
         (window as any).visualViewport.removeEventListener("resize", onViewportResize);
       }
+      intentionalClose = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      wsRef.current?.close();
     };
   },[]);
 

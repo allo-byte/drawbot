@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef } from "react";
 import type { Dispatch, SetStateAction } from "react";
 import type { BrushType, CanvasSize } from "./Canvas";
+import { AvatarDisplay, RemoteAvatar } from "./ProfilePanel";
+import type { Profile } from "./ProfilePanel";
 
 type Setter<T> = Dispatch<SetStateAction<T>> | ((v: T) => void);
 
@@ -47,7 +49,8 @@ type Props = {
   savePNG: () => void;
   users: string[];
   username: string;
-  setUsername: Setter<string>;
+  profile?: Profile;
+  onShowProfile?: () => void;
   room: string;
   createRoom: () => void;
   copyRoomLink: () => void;
@@ -217,38 +220,25 @@ export default function Toolbar({
   panMode, setPanMode, canvasSize, setCanvasSize,
   colorHistory, shortcuts, setShortcuts,
   onUndo, onRedo, canUndo, canRedo,
-  savePNG, users, username, setUsername,
+  savePNG, users, username,
+  profile, onShowProfile,
   room, createRoom, copyRoomLink,
 }: Props) {
   const [showBrushes,  setShowBrushes ] = useState(false);
   const [showColor,    setShowColor   ] = useState(false);
-  const [showUsers,    setShowUsers   ] = useState(false);
   const [showRoom,     setShowRoom    ] = useState(false);
   const [showCanvas,   setShowCanvas  ] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [customW,      setCustomW     ] = useState(1920);
   const [customH,      setCustomH     ] = useState(1080);
-  const [editingNick,  setEditingNick ] = useState(false);
-  const [nickDraft,    setNickDraft   ] = useState(username);
   const [hex,          setHex         ] = useState(color);
   const [capturingKey, setCapturingKey] = useState<keyof Shortcuts | null>(null);
-  const nickRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => setHex(color), [color]);
-  useEffect(() => { if (editingNick) nickRef.current?.focus(); }, [editingNick]);
 
   const closeAll = () => {
     setShowBrushes(false); setShowColor(false);
-    setShowUsers(false); setShowRoom(false);
-    setShowCanvas(false); setShowSettings(false);
-  };
-
-  const saveNick = () => {
-    const t = nickDraft.trim() || "Invitado";
-    setNickDraft(t); setUsername(t);
-    localStorage.setItem("drawbot-name", t);
-    setEditingNick(false);
-    window.location.reload();
+    setShowRoom(false); setShowCanvas(false); setShowSettings(false);
   };
 
   const hexToRgb = (h: string) => {
@@ -274,8 +264,7 @@ export default function Toolbar({
     const k = e.key.toLowerCase();
     if (!["control","shift","alt","meta"].includes(k)) parts.push(k);
     if (parts.length === 0) return;
-    const combo = parts.join("+");
-    setShortcuts((prev: Shortcuts) => ({ ...prev, [capturingKey]: combo }));
+    setShortcuts((prev: Shortcuts) => ({ ...prev, [capturingKey]: parts.join("+") }));
     setCapturingKey(null);
   };
 
@@ -341,7 +330,6 @@ export default function Toolbar({
         }
         .tb-panel-brushes { top: 60px; left: 50%; transform: translateX(-50%); width: min(92vw,380px); }
         .tb-panel-color   { top: 60px; left: 60px; width: 300px; }
-        .tb-panel-users   { top: 60px; right: 12px; width: 220px; }
         .tb-panel-room    { top: 60px; right: 12px; width: 260px; }
         .tb-brushgrid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
         .tb-brushbtn {
@@ -356,21 +344,12 @@ export default function Toolbar({
         .tb-brushbtn.active { border-color: #7070dd; background: #1e1e3a; color: #aaaaff; }
         .tb-brushbtn.active .lbl { color: #9999ee; }
         .tb-brushbtn:hover { background: #222; }
-        .tb-user-item { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 8px; }
-        .tb-user-item:hover { background: #1e1e1e; }
-        .tb-you { font-size: 10px; color: #7070dd; background: #1e1e3a; border-radius: 4px; padding: 1px 5px; }
-        .tb-nick-input {
-          background: #1a1a1a; border: 0.5px solid #444; border-radius: 8px;
-          color: #ccc; font-size: 13px; padding: 6px 8px; flex: 1; outline: none;
-        }
-        .tb-nick-input:focus { border-color: #7070dd; }
         .tb-small-btn {
           background: #1e1e1e; border: 0.5px solid #333; border-radius: 8px;
           color: #aaa; font-size: 12px; padding: 5px 10px; cursor: pointer;
           -webkit-tap-highlight-color: transparent;
         }
         .tb-small-btn:hover { background: #2a2a2a; }
-        .tb-confirm-btn { background: #1e3a1e; border-color: #3a7a3a; color: #8f8; }
         .tb-bg-swatch {
           width: 22px; height: 22px; border-radius: 5px; cursor: pointer;
           border: 1.5px solid #444; flex-shrink: 0; transition: transform .1s;
@@ -402,21 +381,48 @@ export default function Toolbar({
         .tb-key-badge:hover { border-color: #7070dd; color: #aaaaff; }
         .tb-key-badge.capturing { border-color: #e09a3a; color: #e09a3a; animation: pulse .6s infinite; }
         @keyframes pulse { 0%,100% { opacity:1 } 50% { opacity:.5 } }
+
+        /* Avatar de perfil en toolbar */
+        .tb-profile-btn {
+          display: flex; align-items: center; gap: 6px;
+          cursor: pointer; padding: 3px 6px 3px 3px;
+          border-radius: 20px; border: 0.5px solid transparent;
+          transition: background .12s, border-color .12s;
+          -webkit-tap-highlight-color: transparent;
+        }
+        .tb-profile-btn:hover { background: #1e1e1e; border-color: #333; }
+        .tb-profile-name {
+          font-size: 12px; color: #888; max-width: 80px;
+          white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        }
+
         @media (max-width: 480px) {
           .tb-panel-brushes { left: 52px; transform: none; width: calc(100vw - 64px); }
           .tb-panel-color { left: 52px; width: calc(100vw - 64px); }
+          .tb-profile-name { display: none; }
         }
       `}</style>
 
       {/* ═══ BARRA SUPERIOR ═══ */}
       <div className="tb-top" onKeyDown={handleCaptureKey} tabIndex={-1}>
-        <div style={{ display:"flex", alignItems:"center", gap:6, cursor:"pointer" }}
-          onClick={() => { closeAll(); setShowUsers(u=>!u); }}>
-          <UserAvatar name={username} size={30} />
+
+        {/* Avatar / Perfil */}
+        <div className="tb-profile-btn"
+          onClick={() => { closeAll(); onShowProfile?.(); }}>
+          {profile
+            ? <AvatarDisplay profile={profile} size={30}/>
+            : <UserAvatar name={username} size={30}/>
+          }
+          <span className="tb-profile-name">{username}</span>
         </div>
+
         <div className="tb-sep"/>
+
+        {/* Color activo */}
         <div className="tb-color-btn" style={{ background: color }}
           onClick={() => { closeAll(); setShowColor(c=>!c); }} />
+
+        {/* Pincel */}
         <div className={`tb-btn${showBrushes ? " active" : ""}`}
           onClick={() => { closeAll(); setShowBrushes(b=>!b); }} title="Pinceles">
           {eraser ? BRUSH_ICONS.eraser : BRUSH_ICONS[brushType]}
@@ -424,14 +430,20 @@ export default function Toolbar({
         <span style={{ color:"#666", fontSize:12, flexShrink:0 }}>
           {eraser ? "Borrador" : (activeBrush?.label ?? "Pincel")}
         </span>
+
         <div className="tb-sep"/>
+
+        {/* Undo / Redo */}
         <div className="tb-btn" onClick={onUndo}
           title={`Deshacer (${fmtShortcut(shortcuts.undo)})`}
           style={{ opacity: canUndo ? 1 : 0.3, fontSize:14 }}>↩️</div>
         <div className="tb-btn" onClick={onRedo}
           title={`Rehacer (${fmtShortcut(shortcuts.redo)})`}
           style={{ opacity: canRedo ? 1 : 0.3, fontSize:14 }}>↪️</div>
+
         <div className="tb-sep"/>
+
+        {/* Pan / Borrador */}
         <div className={`tb-btn${panMode ? " active" : ""}`}
           onClick={() => { setPanMode(!panMode); if (!panMode) setEraser(false); }}
           title={`Mover (${fmtShortcut(shortcuts.pan)})`} style={{ fontSize:16 }}>✋</div>
@@ -440,23 +452,35 @@ export default function Toolbar({
           title={`Borrador (${fmtShortcut(shortcuts.eraser)})`}>
           {BRUSH_ICONS.eraser}
         </div>
+
         <div style={{ flex:1 }}/>
+
+        {/* Stack de usuarios en sala */}
         <div className="tb-avatar-stack" style={{ cursor:"pointer" }}
-          onClick={() => { closeAll(); setShowUsers(u=>!u); }}>
-          {users.slice(0,3).map((u,i) => <UserAvatar key={i} name={u} size={26}/>)}
+          onClick={() => { closeAll(); onShowProfile?.(); }}>
+          {users.slice(0,3).map((u,i) => <RemoteAvatar key={i} username={u} size={26}/>)}
         </div>
         <span style={{ color:"#00ff88", fontSize:12, marginLeft:4 }}>{users.length}</span>
+
         <div className="tb-sep"/>
+
+        {/* Sala */}
         <div className={`tb-btn${showRoom ? " active" : ""}`}
           onClick={() => { closeAll(); setShowRoom(r=>!r); }} title="Sala" style={{ fontSize:14 }}>🔗</div>
+
+        {/* Tamaño lienzo */}
         <div className={`tb-btn${showCanvas ? " active" : ""}`}
           onClick={() => { closeAll(); setShowCanvas(c=>!c); }}
           title="Tamaño del lienzo" style={{ flexDirection:"column" as any, gap:1 }}>
           <span style={{fontSize:10}}>⬜</span>
           <span style={{fontSize:7, color:"#666"}}>px</span>
         </div>
+
+        {/* Guardar */}
         <div className="tb-btn" onClick={savePNG}
           title={`Guardar PNG (${fmtShortcut(shortcuts.save)})`} style={{ fontSize:14 }}>💾</div>
+
+        {/* Ajustes */}
         <div className={`tb-btn${showSettings ? " active" : ""}`}
           onClick={() => { closeAll(); setShowSettings(s=>!s); }} title="Ajustes" style={{ fontSize:16 }}>⚙️</div>
       </div>
@@ -558,39 +582,19 @@ export default function Toolbar({
         </>
       )}
 
-      {/* ═══ PANEL USUARIOS ═══ */}
-      {showUsers && (
+      {/* ═══ PANEL SALA ═══ */}
+      {showRoom && (
         <>
-          <div className="tb-overlay" onClick={() => setShowUsers(false)}/>
-          <div className="tb-panel tb-panel-users" style={{ zIndex:1100 }}>
-            <div className="tb-section">Tu perfil</div>
-            {editingNick ? (
-              <div style={{ display:"flex", gap:6, marginBottom:12 }}>
-                <input ref={nickRef} value={nickDraft}
-                  onChange={e => setNickDraft(e.target.value)}
-                  onKeyDown={e => { if(e.key==="Enter") saveNick(); if(e.key==="Escape") setEditingNick(false); }}
-                  maxLength={24} placeholder="Tu nombre" className="tb-nick-input" />
-                <button className="tb-small-btn tb-confirm-btn" onClick={saveNick}>✓</button>
-                <button className="tb-small-btn" onClick={() => setEditingNick(false)}>✕</button>
-              </div>
-            ) : (
-              <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:12,
-                cursor:"pointer", padding:"6px 8px", borderRadius:8, background:"#1a1a1a" }}
-                onClick={() => { setNickDraft(username); setEditingNick(true); }}>
-                <UserAvatar name={username} size={28}/>
-                <span style={{ color:"#ccc", fontSize:13, flex:1 }}>{username}</span>
-                <span style={{ color:"#555", fontSize:11 }}>✏️</span>
-              </div>
-            )}
-            <div style={{ borderTop:"0.5px solid #2e2e2e", paddingTop:10 }}>
-              <div className="tb-section">En sala ({users.length})</div>
-              {users.map((u,i) => (
-                <div key={i} className="tb-user-item">
-                  <UserAvatar name={u} size={26}/>
-                  <span style={{ color:"#ccc", fontSize:13, flex:1 }}>{u}</span>
-                  {u===username && <span className="tb-you">tú</span>}
-                </div>
-              ))}
+          <div className="tb-overlay" onClick={() => setShowRoom(false)}/>
+          <div className="tb-panel tb-panel-room" style={{ zIndex:1100 }}>
+            <div className="tb-section">Sala</div>
+            <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:10 }}>
+              <span style={{ color:"#ccc", fontSize:13, fontFamily:"monospace",
+                background:"#1a1a1a", padding:"5px 10px", borderRadius:8, flex:1 }}>{room}</span>
+            </div>
+            <div style={{ display:"flex", gap:8 }}>
+              <button className="tb-small-btn" style={{ flex:1 }} onClick={createRoom}>➕ Nueva</button>
+              <button className="tb-small-btn" style={{ flex:1 }} onClick={copyRoomLink}>🔗 Copiar</button>
             </div>
           </div>
         </>
@@ -643,24 +647,6 @@ export default function Toolbar({
                     color:"#aaaaff", fontSize:12, padding:"5px 10px", cursor:"pointer" }}>✓</button>
               </div>
               <div style={{ color:"#444", fontSize:10, marginTop:4, textAlign:"center" }}>máx 8192×8192 px</div>
-            </div>
-          </div>
-        </>
-      )}
-
-      {/* ═══ PANEL SALA ═══ */}
-      {showRoom && (
-        <>
-          <div className="tb-overlay" onClick={() => setShowRoom(false)}/>
-          <div className="tb-panel tb-panel-room" style={{ zIndex:1100 }}>
-            <div className="tb-section">Sala</div>
-            <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:10 }}>
-              <span style={{ color:"#ccc", fontSize:13, fontFamily:"monospace",
-                background:"#1a1a1a", padding:"5px 10px", borderRadius:8, flex:1 }}>{room}</span>
-            </div>
-            <div style={{ display:"flex", gap:8 }}>
-              <button className="tb-small-btn" style={{ flex:1 }} onClick={createRoom}>➕ Nueva</button>
-              <button className="tb-small-btn" style={{ flex:1 }} onClick={copyRoomLink}>🔗 Copiar</button>
             </div>
           </div>
         </>
