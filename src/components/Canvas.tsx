@@ -16,6 +16,12 @@ type Stroke = {
   layerId?:  number;
 };
 
+export type BlendMode =
+  | "normal" | "multiply" | "screen" | "overlay"
+  | "darken" | "lighten" | "color-dodge" | "color-burn"
+  | "hard-light" | "soft-light" | "difference" | "exclusion"
+  | "hue" | "color" | "add" | "subtract" | "divide" | "lighter-color";
+
 export type Layer = {
   id:        number;
   name:      string;
@@ -24,7 +30,34 @@ export type Layer = {
   locked:    boolean;
   ownerId:   string;
   ownerName: string;
+  blendMode?: BlendMode;  // default = "normal"
 };
+
+// Mapa de BlendMode → GlobalCompositeOperation del canvas
+const BLEND_CSS: Record<string, GlobalCompositeOperation> = {
+  "normal":       "source-over",
+  "multiply":     "multiply",
+  "screen":       "screen",
+  "overlay":      "overlay",
+  "darken":       "darken",
+  "lighten":      "lighten",
+  "color-dodge":  "color-dodge",
+  "color-burn":   "color-burn",
+  "hard-light":   "hard-light",
+  "soft-light":   "soft-light",
+  "difference":   "difference",
+  "exclusion":    "exclusion",
+  "hue":          "hue",
+  "color":        "color",
+  "add":          "lighter",
+  "subtract":     "difference",
+  "divide":       "color-dodge",
+  "lighter-color":"lighten",
+};
+
+function getBlendCSS(mode?: BlendMode): GlobalCompositeOperation {
+  return BLEND_CSS[mode ?? "normal"] ?? "source-over";
+}
 
 export type CanvasImage = {
   id: number; data: string;
@@ -102,6 +135,7 @@ export default function Canvas({
 }: Props) {
   const canvasRef         = useRef<HTMLCanvasElement>(null);
   const layerOffscrRef    = useRef<Map<number, HTMLCanvasElement>>(new Map());
+  const dirtyLayersRef    = useRef<Set<number>>(new Set());
   const remotePreviewsRef = useRef<Map<string, Stroke>>(new Map());
   const wsRef             = useRef<WebSocket | null>(null);
   const cursorsRef        = useRef<Map<string, Cursor>>(new Map());
@@ -294,11 +328,13 @@ export default function Canvas({
     ctx.setTransform(1,0,0,1,0,0);
     ctx.clearRect(0,0,WORLD_W,WORLD_H);
     strokesRef.current.filter(s => (s.layerId ?? -1) === layerId).forEach(s => drawStroke(ctx,s));
+    dirtyLayersRef.current.delete(layerId);
   };
 
   const rebuildAllLayers = () => {
     const ids = new Set(layersRef.current.map(l => l.id));
     ids.forEach(id => rebuildLayerCanvas(id));
+    dirtyLayersRef.current.clear();
   };
 
   // ── composite ────────────────────────────────────────────────────────────
@@ -327,13 +363,15 @@ export default function Canvas({
         if (el) c.drawImage(el, img.x, img.y, img.w, img.h);
       }
       for (const layer of layersRef.current) {
-        // Capas propias: usar visible del servidor; capas ajenas: usar localHidden
         const isHidden = layer.visible === false || localHiddenRef.current.has(layer.id);
         if (isHidden) continue;
+        // Flush dirty antes de compositar
+        if (dirtyLayersRef.current.has(layer.id)) rebuildLayerCanvas(layer.id);
         const lc = layerOffscrRef.current.get(layer.id);
         if (!lc) continue;
         c.save();
         c.globalAlpha = layer.opacity;
+        c.globalCompositeOperation = getBlendCSS(layer.blendMode);
         c.drawImage(lc, 0,0);
         c.restore();
       }
@@ -775,6 +813,41 @@ export default function Canvas({
   },[]);
 
   // Exponer helpers al padre via estáticos
+  // Merge de dos capas propias (destructivo pero con undo via onStrokeAdded)
+  (Canvas as any)._mergeLayers = (bottomId: number, topId: number) => {
+    const bottomLc = layerOffscrRef.current.get(bottomId);
+    const topLc    = layerOffscrRef.current.get(topId);
+    if (!bottomLc || !topLc) return;
+
+    // Obtener blend mode de la capa superior
+    const topLayer  = layersRef.current.find(l => l.id === topId);
+    const blendMode = getBlendCSS(topLayer?.blendMode);
+    const topOpacity = topLayer?.opacity ?? 1;
+
+    // Crear canvas temporal con el resultado fusionado
+    const merged = document.createElement("canvas");
+    merged.width = WORLD_W; merged.height = WORLD_H;
+    const mCtx = merged.getContext("2d")!;
+    // 1. Dibujar capa inferior
+    mCtx.drawImage(bottomLc, 0, 0);
+    // 2. Aplicar blend mode de la superior sobre la inferior
+    mCtx.save();
+    mCtx.globalCompositeOperation = blendMode;
+    mCtx.globalAlpha = topOpacity;
+    mCtx.drawImage(topLc, 0, 0);
+    mCtx.restore();
+
+    // Reemplazar offscreen de la capa inferior con el resultado
+    const bottomCtx = bottomLc.getContext("2d")!;
+    bottomCtx.clearRect(0, 0, WORLD_W, WORLD_H);
+    bottomCtx.drawImage(merged, 0, 0);
+
+    // Limpiar offscreen de la capa superior
+    topLc.getContext("2d")!.clearRect(0, 0, WORLD_W, WORLD_H);
+
+    requestFrame();
+  };
+
   (Canvas as any)._rename = (name: string) => {
     if (wsRef.current?.readyState === WebSocket.OPEN)
       wsRef.current.send(JSON.stringify({type:"rename", username: name}));

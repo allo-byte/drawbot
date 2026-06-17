@@ -1,10 +1,32 @@
 import { useState } from "react";
 import type { Layer } from "./Canvas";
 
+const BLEND_MODES: { id: string; label: string }[] = [
+  {id:"normal",       label:"Normal"},
+  {id:"multiply",     label:"Multiplicar"},
+  {id:"screen",       label:"Pantalla"},
+  {id:"overlay",      label:"Superposición"},
+  {id:"darken",       label:"Oscurecer"},
+  {id:"lighten",      label:"Aclarar"},
+  {id:"color-dodge",  label:"Subexp. color"},
+  {id:"color-burn",   label:"Sobrexp. color"},
+  {id:"hard-light",   label:"Luz fuerte"},
+  {id:"soft-light",   label:"Luz suave"},
+  {id:"difference",   label:"Diferencia"},
+  {id:"exclusion",    label:"Exclusión"},
+  {id:"hue",          label:"Tono"},
+  {id:"color",        label:"Color"},
+  {id:"add",          label:"Añadir"},
+  {id:"subtract",     label:"Restar"},
+  {id:"divide",       label:"Dividir"},
+  {id:"lighter-color",label:"Color más claro"},
+];
+
 type Props = {
   layers:        Layer[];
   activeLayerId: number;
   myUserId:      string;
+  layerLimit:    number;
   onSelect:      (id: number) => void;
   onAdd:         () => void;
   onDelete:      (id: number) => void;
@@ -13,6 +35,8 @@ type Props = {
   onRename:      (id: number, name: string) => void;
   onReorder:     (fromIdx: number, toIdx: number) => void;
   onOpacity:     (id: number, opacity: number) => void;
+  onMerge:       (topLayerId: number) => void;
+  onBlendMode:   (id: number, mode: string) => void;
 };
 
 function userColor(name: string) {
@@ -34,10 +58,10 @@ function Avatar({ name, size = 18 }: { name: string; size?: number }) {
 }
 
 export default function LayerPanel({
-  layers, activeLayerId, myUserId,
+  layers, activeLayerId, myUserId, layerLimit,
   onSelect, onAdd, onDelete,
   onToggleVisibility, onToggleLock,
-  onRename, onReorder, onOpacity,
+  onRename, onReorder, onOpacity, onMerge, onBlendMode,
 }: Props) {
   const [editingId,    setEditingId   ] = useState<number|null>(null);
   const [nameDraft,    setNameDraft   ] = useState("");
@@ -196,7 +220,19 @@ export default function LayerPanel({
         {/* Header */}
         <div className="lp-header">
           <span className="lp-title">Capas</span>
-          <button className="lp-add" onClick={onAdd} title="Nueva capa">+</button>
+          <div style={{display:"flex",alignItems:"center",gap:5}}>
+            <span style={{fontSize:9, color: myLayers.length>=layerLimit?"#e05d5d":"#383838"}}>
+              {myLayers.length}/{layerLimit}
+            </span>
+            <button
+              className="lp-add"
+              onClick={onAdd}
+              title={myLayers.length>=layerLimit?`Límite de ${layerLimit} capas`:"Nueva capa"}
+              disabled={myLayers.length>=layerLimit}
+              style={{opacity:myLayers.length>=layerLimit?0.3:1,
+                cursor:myLayers.length>=layerLimit?"not-allowed":"pointer"}}
+            >+</button>
+          </div>
         </div>
 
         <div className="lp-scroll">
@@ -248,6 +284,18 @@ export default function LayerPanel({
                       title="Doble clic para renombrar"
                     >{layer.name}</div>
                   )}
+                  {isActive && (
+                    <select
+                      className="lp-blend-select"
+                      value={layer.blendMode ?? "normal"}
+                      onChange={e => { e.stopPropagation(); onBlendMode(layer.id, e.target.value); }}
+                      onClick={e => e.stopPropagation()}
+                    >
+                      {BLEND_MODES.map(m => (
+                        <option key={m.id} value={m.id}>{m.label}</option>
+                      ))}
+                    </select>
+                  )}
                 </div>
                 <div className="lp-ops" onClick={e => e.stopPropagation()}>
                   <button
@@ -260,6 +308,12 @@ export default function LayerPanel({
                     title={layer.locked?"Desbloquear":"Bloquear"}
                     onClick={() => onToggleLock(layer.id)}
                   >{layer.locked?"🔒":"🔓"}</button>
+                  <button
+                    className="lp-merge-btn"
+                    title={origIdx===0 ? "No hay capa debajo" : "Fusionar con capa inferior"}
+                    disabled={origIdx===0}
+                    onClick={() => onMerge(layer.id)}
+                  >⤵</button>
                   {myLayers.length > 1 && (
                     <button
                       className="lp-ibtn del"

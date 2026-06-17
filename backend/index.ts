@@ -204,7 +204,20 @@ wss.on("connection", (ws: WebSocket) => {
 
     // ── LAYER: añadir capa propia ────────────────────────────────────────────
     if (data.type === "layer_add") {
-      const layers = roomLayers.get(roomId)!;
+      const layers   = roomLayers.get(roomId)!;
+      const myLayers = layers.filter(l => l.ownerId === userId);
+      // Límite dinámico por tamaño de lienzo (se envía en el mensaje)
+      const canvasPx = data.canvasW && data.canvasH ? data.canvasW * data.canvasH : 0;
+      const limit =
+        canvasPx === 0         ? 12 :
+        canvasPx <= 1920*1080  ? 10 :
+        canvasPx <= 2048*2048  ? 8  :
+        canvasPx <= 2480*3508  ? 6  :
+        canvasPx <= 3840*2160  ? 4  : 2;
+      if (myLayers.length >= limit) {
+        ws.send(JSON.stringify({ type:"layer_limit_reached", limit }));
+        return;
+      }
       const newLayer: Layer = {
         id:        ++globalLayerId,
         name:      data.name || `Capa ${layers.filter(l=>l.ownerId===userId).length+1}`,

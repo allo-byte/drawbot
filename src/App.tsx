@@ -17,6 +17,17 @@ type Stroke = {
 const MAX_HISTORY       = 50;
 const MAX_COLOR_HISTORY = 8;
 
+// Límite de capas por tamaño de lienzo
+function getLayerLimit(canvasSize: { w:number; h:number } | null): number {
+  if (!canvasSize) return 12;
+  const px = canvasSize.w * canvasSize.h;
+  if (px <= 1920*1080) return 10;
+  if (px <= 2048*2048) return 8;
+  if (px <= 2480*3508) return 6;
+  if (px <= 3840*2160) return 4;
+  return 2;
+}
+
 function App() {
   const [color,      setColorRaw ] = useState("#ffffff");
   const [brushSize,  setBrushSize] = useState(5);
@@ -169,14 +180,57 @@ function App() {
   }, []);
 
   // ── Layer handlers ───────────────────────────────────────────────────────
-  // Mis capas
-  const myLayers = layers.filter(l => l.ownerId === myUserId);
+  const myLayers   = layers.filter(l => l.ownerId === myUserId);
+  const layerLimit = getLayerLimit(canvasSize);
+
+  const pushLayerUpdate = (newLayers: Layer[]) => {
+    setLayers(newLayers);
+    (Canvas as any)._sendWS?.({ type: "layer_update", layers: newLayers.filter(l => l.ownerId === myUserId) });
+  };
 
   const handleAddLayer = () => {
+    if (myLayers.length >= layerLimit) return;
     (Canvas as any)._sendWS?.({
-      type: "layer_add",
-      name: `Capa ${myLayers.length + 1}`,
+      type:    "layer_add",
+      name:    `Capa ${myLayers.length + 1}`,
+      canvasW: canvasSize?.w ?? 0,
+      canvasH: canvasSize?.h ?? 0,
     });
+  };
+
+  // Merge: fusionar capa superior con la de abajo (con undo)
+  const handleMergeLayers = (topLayerId: number) => {
+    const myIdx   = myLayers.findIndex(l => l.id === topLayerId);
+    if (myIdx <= 0) return; // no hay capa debajo
+    const bottomLayer = myLayers[myIdx - 1];
+    const topLayer    = myLayers[myIdx];
+
+    // Snapshot para undo — guardamos los strokes antes del merge
+    const snapBefore = layers.map(l => ({ ...l }));
+
+    // Ejecutar merge visual en el canvas
+    (Canvas as any)._mergeLayers?.(bottomLayer.id, topLayer.id);
+
+    // Mover strokes de la capa superior a la inferior
+    const updated = layers.map(l => {
+      if (l.id === topLayer.id) return null; // eliminar capa superior
+      return l;
+    }).filter(Boolean) as typeof layers;
+
+    pushLayerUpdate(updated);
+    if (activeLayerId === topLayerId) setActiveLayerId(bottomLayer.id);
+
+    // Registrar en el undo stack
+    undoStackRef.current = [...undoStackRef.current.slice(-50), snapBefore as any];
+    setUndoLen(undoStackRef.current.length);
+  };
+
+  // Cambiar blend mode de una capa
+  const handleBlendMode = (id: number, blendMode: string) => {
+    const updated = layers.map(l =>
+      l.id === id && l.ownerId === myUserId ? { ...l, blendMode: blendMode as any } : l
+    );
+    pushLayerUpdate(updated);
   };
 
   const handleDeleteLayer = (id: number) => {
@@ -337,6 +391,7 @@ function App() {
           layers={layers}
           activeLayerId={safeActiveId}
           myUserId={myUserId}
+          layerLimit={layerLimit}
           onSelect={setActiveLayerId}
           onAdd={handleAddLayer}
           onDelete={handleDeleteLayer}
@@ -345,6 +400,8 @@ function App() {
           onRename={handleRename}
           onReorder={handleReorder}
           onOpacity={handleLayerOpacity}
+          onMerge={handleMergeLayers}
+          onBlendMode={handleBlendMode}
         />
       )}
     </>
