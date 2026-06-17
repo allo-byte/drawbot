@@ -1,9 +1,10 @@
-import { useState, useRef } from "react";
+import { useState } from "react";
 import type { Layer } from "./Canvas";
 
 type Props = {
   layers:        Layer[];
   activeLayerId: number;
+  myUserId:      string;
   onSelect:      (id: number) => void;
   onAdd:         () => void;
   onDelete:      (id: number) => void;
@@ -14,156 +15,199 @@ type Props = {
   onOpacity:     (id: number, opacity: number) => void;
 };
 
+function userColor(name: string) {
+  const colors = ["#e05d5d","#e09a3a","#d4c94a","#5dbe6e","#4ab8d4","#7070dd","#c46edd","#dd6eaa"];
+  let hash = 0;
+  for (let i = 0; i < name.length; i++) hash = name.charCodeAt(i) + ((hash << 5) - hash);
+  return colors[Math.abs(hash) % colors.length];
+}
+
+function Avatar({ name, size = 18 }: { name: string; size?: number }) {
+  return (
+    <div style={{
+      width: size, height: size, borderRadius: "50%",
+      background: userColor(name), color: "#fff",
+      display: "flex", alignItems: "center", justifyContent: "center",
+      fontSize: size * 0.42, fontWeight: "bold", flexShrink: 0,
+    }}>{name.trim().slice(0,2).toUpperCase()||"?"}</div>
+  );
+}
+
 export default function LayerPanel({
-  layers, activeLayerId,
+  layers, activeLayerId, myUserId,
   onSelect, onAdd, onDelete,
   onToggleVisibility, onToggleLock,
   onRename, onReorder, onOpacity,
 }: Props) {
-  const [editingId,   setEditingId  ] = useState<number | null>(null);
-  const [nameDraft,   setNameDraft  ] = useState("");
-  const [dragIdx,     setDragIdx    ] = useState<number | null>(null);
-  const [dragOverIdx, setDragOverIdx] = useState<number | null>(null);
-  const nameRef = useRef<HTMLInputElement>(null);
+  const [editingId,    setEditingId   ] = useState<number|null>(null);
+  const [nameDraft,    setNameDraft   ] = useState("");
+  const [dragIdx,      setDragIdx     ] = useState<number|null>(null);
+  const [dragOverIdx,  setDragOverIdx ] = useState<number|null>(null);
+  // Visibilidad LOCAL de capas ajenas (no se envía al servidor)
+  const [localHidden,  setLocalHidden ] = useState<Set<number>>(new Set());
 
-  const startRename = (layer: Layer) => {
-    setEditingId(layer.id);
-    setNameDraft(layer.name);
-    setTimeout(() => nameRef.current?.focus(), 30);
+  const myLayers    = layers.filter(l => l.ownerId === myUserId);
+  const otherLayers = layers.filter(l => l.ownerId !== myUserId);
+
+  // Agrupar capas ajenas por dueño
+  const byOwner = new Map<string, { ownerName: string; layers: Layer[] }>();
+  for (const l of otherLayers) {
+    if (!byOwner.has(l.ownerId))
+      byOwner.set(l.ownerId, { ownerName: l.ownerName, layers: [] });
+    byOwner.get(l.ownerId)!.layers.push(l);
+  }
+
+  const toggleLocalHidden = (id: number) => {
+    setLocalHidden(prev => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
   };
 
+  const startRename = (l: Layer) => {
+    setEditingId(l.id); setNameDraft(l.name);
+  };
   const commitRename = (id: number) => {
     const t = nameDraft.trim();
     if (t) onRename(id, t);
     setEditingId(null);
   };
 
-  // Capas mostradas de arriba (última) a abajo (primera) — como Photoshop
-  const reversed = [...layers].reverse();
+  const activeLayer = myLayers.find(l => l.id === activeLayerId);
 
   return (
     <>
       <style>{`
         .lp-wrap {
-          position: fixed;
-          right: 0; top: 52px; bottom: 0;
-          width: 200px;
-          background: rgba(16,16,16,0.97);
-          border-left: 0.5px solid #282828;
-          display: flex; flex-direction: column;
-          z-index: 900;
-          user-select: none;
+          position:fixed; right:0; top:52px; bottom:0; width:210px;
+          background:rgba(14,14,14,0.97);
+          border-left:0.5px solid #252525;
+          display:flex; flex-direction:column;
+          z-index:900; user-select:none;
+          font-family: system-ui, sans-serif;
         }
         .lp-header {
-          display: flex; align-items: center; justify-content: space-between;
-          padding: 10px 12px 8px;
-          border-bottom: 0.5px solid #222;
-          flex-shrink: 0;
+          display:flex; align-items:center; justify-content:space-between;
+          padding:10px 12px 8px;
+          border-bottom:0.5px solid #1e1e1e; flex-shrink:0;
         }
-        .lp-title {
-          font-size: 10px; color: #555;
-          text-transform: uppercase; letter-spacing: .07em;
+        .lp-title { font-size:10px; color:#484848; text-transform:uppercase; letter-spacing:.08em; }
+        .lp-add {
+          width:22px; height:22px; border-radius:6px;
+          background:#1a1a1a; border:0.5px solid #2e2e2e;
+          color:#777; font-size:15px; display:flex;
+          align-items:center; justify-content:center;
+          cursor:pointer; transition:all .12s; flex-shrink:0;
         }
-        .lp-add-btn {
-          width: 24px; height: 24px; border-radius: 7px;
-          background: #1e1e1e; border: 0.5px solid #333;
-          color: #888; font-size: 16px; line-height: 1;
-          display: flex; align-items: center; justify-content: center;
-          cursor: pointer; transition: background .12s, border-color .12s;
-          flex-shrink: 0;
+        .lp-add:hover { background:#22224a; border-color:#7070dd; color:#aaaaff; }
+        .lp-scroll { flex:1; overflow-y:auto; padding:4px 0 8px; }
+        .lp-scroll::-webkit-scrollbar { width:3px; }
+        .lp-scroll::-webkit-scrollbar-thumb { background:#232323; border-radius:2px; }
+
+        /* Sección */
+        .lp-section {
+          padding:8px 12px 4px;
+          font-size:9px; color:#3a3a3a;
+          text-transform:uppercase; letter-spacing:.08em;
+          display:flex; align-items:center; gap:6px;
         }
-        .lp-add-btn:hover { background: #2a2a5a; border-color: #7070dd; color: #aaaaff; }
-        .lp-list {
-          flex: 1; overflow-y: auto; padding: 6px 0;
-        }
-        .lp-list::-webkit-scrollbar { width: 4px; }
-        .lp-list::-webkit-scrollbar-thumb { background: #2a2a2a; border-radius: 2px; }
+        .lp-section-line { flex:1; height:0.5px; background:#1e1e1e; }
+
+        /* Item de capa */
         .lp-item {
-          display: flex; align-items: center; gap: 6px;
-          padding: 6px 10px;
-          cursor: pointer;
-          transition: background .1s;
-          border-left: 2.5px solid transparent;
-          position: relative;
+          display:flex; align-items:center; gap:5px;
+          padding:5px 10px 5px 8px;
+          cursor:pointer; border-left:2.5px solid transparent;
+          transition:background .1s;
+          position:relative;
         }
-        .lp-item:hover { background: #1c1c1c; }
-        .lp-item.active {
-          background: #1a1a30;
-          border-left-color: #7070dd;
-        }
-        .lp-item.drag-over { background: #222240; }
+        .lp-item:hover { background:#191919; }
+        .lp-item.active { background:#181830; border-left-color:#7070dd; }
+        .lp-item.drag-over { background:#1e1e38; }
+        .lp-item.readonly { cursor:default; padding-left:20px; }
+
+        .lp-handle { font-size:10px; color:#2a2a2a; cursor:grab; padding:0 2px; flex-shrink:0; }
+        .lp-handle:hover { color:#444; }
+        .lp-handle:active { cursor:grabbing; }
+
         .lp-thumb {
-          width: 32px; height: 32px; border-radius: 5px;
-          background: #222; border: 0.5px solid #333;
-          flex-shrink: 0; overflow: hidden;
-          display: flex; align-items: center; justify-content: center;
-          font-size: 9px; color: #444;
+          width:28px; height:28px; border-radius:4px;
+          background:#1c1c1c; border:0.5px solid #2a2a2a;
+          flex-shrink:0; display:flex; align-items:center;
+          justify-content:center; font-size:8px; color:#383838;
+          overflow:hidden;
         }
-        .lp-info { flex: 1; min-width: 0; }
+
+        .lp-info { flex:1; min-width:0; }
         .lp-name {
-          font-size: 12px; color: #ccc;
-          white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+          font-size:11.5px; color:#bbb;
+          white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
         }
-        .lp-name.hidden { color: #444; }
-        .lp-name.locked { color: #888; }
+        .lp-name.dim { color:#3a3a3a; }
         .lp-name-input {
-          width: 100%; background: #111; border: 0.5px solid #7070dd;
-          border-radius: 5px; color: #ccc; font-size: 12px;
-          padding: 2px 5px; outline: none;
+          width:100%; background:#111; border:0.5px solid #7070dd;
+          border-radius:4px; color:#ccc; font-size:11px;
+          padding:2px 4px; outline:none;
         }
-        .lp-ops {
-          display: flex; gap: 2px; align-items: center; flex-shrink: 0;
+
+        .lp-ops { display:flex; gap:1px; align-items:center; flex-shrink:0; }
+        .lp-ibtn {
+          width:18px; height:18px; border-radius:4px;
+          background:transparent; border:none; color:#3a3a3a;
+          font-size:11px; cursor:pointer; padding:0;
+          display:flex; align-items:center; justify-content:center;
+          transition:all .1s;
         }
-        .lp-icon-btn {
-          width: 20px; height: 20px; border-radius: 5px;
-          background: transparent; border: none;
-          color: #555; font-size: 12px; cursor: pointer;
-          display: flex; align-items: center; justify-content: center;
-          transition: color .1s, background .1s;
-          padding: 0;
+        .lp-ibtn:hover { color:#aaa; background:#222; }
+        .lp-ibtn.on { color:#7070dd; }
+        .lp-ibtn.del:hover { color:#ff5555 !important; background:#1e1010 !important; }
+
+        /* Grupo de otro usuario */
+        .lp-owner {
+          display:flex; align-items:center; gap:6px;
+          padding:7px 12px 3px 12px;
         }
-        .lp-icon-btn:hover { color: #ccc; background: #2a2a2a; }
-        .lp-icon-btn.active { color: #7070dd; }
-        .lp-del-btn:hover { color: #ff6b6b !important; background: #2a1a1a !important; }
-        .lp-opacity-row {
-          padding: 6px 10px 4px;
-          border-top: 0.5px solid #1e1e1e;
-          flex-shrink: 0;
+        .lp-owner-name { font-size:10px; color:#404040; }
+
+        /* Opacidad */
+        .lp-opa-row {
+          padding:8px 12px 10px;
+          border-top:0.5px solid #1a1a1a; flex-shrink:0;
         }
-        .lp-opacity-label {
-          font-size: 9px; color: #444; text-transform: uppercase;
-          letter-spacing: .06em; margin-bottom: 4px;
-          display: flex; justify-content: space-between;
+        .lp-opa-lbl {
+          font-size:9px; color:#383838; text-transform:uppercase;
+          letter-spacing:.06em; margin-bottom:5px;
+          display:flex; justify-content:space-between;
         }
-        .lp-opacity-slider {
-          -webkit-appearance: none;
-          width: 100%; height: 4px; border-radius: 2px;
-          background: #222; outline: none; cursor: pointer;
+        .lp-opa-lbl span:last-child { color:#555; }
+        input[type=range].lp-slider {
+          -webkit-appearance:none; width:100%; height:3px;
+          border-radius:2px; background:#1e1e1e; outline:none; cursor:pointer;
         }
-        .lp-opacity-slider::-webkit-slider-thumb {
-          -webkit-appearance: none;
-          width: 12px; height: 12px; border-radius: 50%;
-          background: #7070dd; border: 1.5px solid #aaaaff;
-          cursor: pointer;
+        input[type=range].lp-slider::-webkit-slider-thumb {
+          -webkit-appearance:none; width:11px; height:11px;
+          border-radius:50%; background:#7070dd;
+          border:1.5px solid #aaaaff; cursor:pointer;
         }
-        .lp-drag-handle {
-          font-size: 11px; color: #333; cursor: grab;
-          flex-shrink: 0; padding: 0 2px;
-          line-height: 1;
-        }
-        .lp-drag-handle:hover { color: #555; }
-        .lp-drag-handle:active { cursor: grabbing; }
       `}</style>
 
       <div className="lp-wrap">
+        {/* Header */}
         <div className="lp-header">
           <span className="lp-title">Capas</span>
-          <button className="lp-add-btn" onClick={onAdd} title="Nueva capa">+</button>
+          <button className="lp-add" onClick={onAdd} title="Nueva capa">+</button>
         </div>
 
-        <div className="lp-list">
-          {reversed.map((layer, rIdx) => {
-            const origIdx = layers.length - 1 - rIdx;
+        <div className="lp-scroll">
+          {/* ── MIS CAPAS ── */}
+          <div className="lp-section">
+            <span>Mis capas</span>
+            <div className="lp-section-line"/>
+          </div>
+
+          {[...myLayers].reverse().map((layer, rIdx) => {
+            const origIdx = myLayers.length - 1 - rIdx;
             const isActive = layer.id === activeLayerId;
             return (
               <div
@@ -180,19 +224,12 @@ export default function LayerPanel({
                 }}
                 onDragEnd={() => { setDragIdx(null); setDragOverIdx(null); }}
               >
-                {/* Drag handle */}
-                <span className="lp-drag-handle" title="Arrastrar">⠿</span>
-
-                {/* Thumbnail placeholder */}
-                <div className="lp-thumb">
-                  <span>{layer.id}</span>
-                </div>
-
-                {/* Name */}
+                <span className="lp-handle">⠿</span>
+                <div className="lp-thumb">{layer.id}</div>
                 <div className="lp-info">
                   {editingId === layer.id ? (
                     <input
-                      ref={nameRef}
+                      autoFocus
                       className="lp-name-input"
                       value={nameDraft}
                       onChange={e => setNameDraft(e.target.value)}
@@ -206,66 +243,91 @@ export default function LayerPanel({
                     />
                   ) : (
                     <div
-                      className={`lp-name${!layer.visible?" hidden":""}${layer.locked?" locked":""}`}
+                      className={`lp-name${!layer.visible?" dim":""}`}
                       onDoubleClick={e => { e.stopPropagation(); startRename(layer); }}
                       title="Doble clic para renombrar"
-                    >
-                      {layer.name}
-                    </div>
+                    >{layer.name}</div>
                   )}
                 </div>
-
-                {/* Actions */}
                 <div className="lp-ops" onClick={e => e.stopPropagation()}>
                   <button
-                    className={`lp-icon-btn${layer.visible?" active":""}`}
-                    title={layer.visible ? "Ocultar" : "Mostrar"}
+                    className={`lp-ibtn${layer.visible?" on":""}`}
+                    title={layer.visible?"Ocultar":"Mostrar"}
                     onClick={() => onToggleVisibility(layer.id)}
-                  >
-                    {layer.visible ? "👁" : "🚫"}
-                  </button>
+                  >{layer.visible?"👁":"◌"}</button>
                   <button
-                    className={`lp-icon-btn${layer.locked?" active":""}`}
-                    title={layer.locked ? "Desbloquear" : "Bloquear"}
+                    className={`lp-ibtn${layer.locked?" on":""}`}
+                    title={layer.locked?"Desbloquear":"Bloquear"}
                     onClick={() => onToggleLock(layer.id)}
-                  >
-                    {layer.locked ? "🔒" : "🔓"}
-                  </button>
-                  {layers.length > 1 && (
+                  >{layer.locked?"🔒":"🔓"}</button>
+                  {myLayers.length > 1 && (
                     <button
-                      className="lp-icon-btn lp-del-btn"
-                      title="Eliminar capa"
+                      className="lp-ibtn del"
+                      title="Eliminar"
                       onClick={() => onDelete(layer.id)}
-                    >
-                      ✕
-                    </button>
+                    >✕</button>
                   )}
                 </div>
               </div>
             );
           })}
+
+          {/* ── CAPAS DE OTROS USUARIOS ── */}
+          {byOwner.size > 0 && (
+            <div className="lp-section" style={{marginTop:8}}>
+              <span>Sala</span>
+              <div className="lp-section-line"/>
+            </div>
+          )}
+          {Array.from(byOwner.entries()).map(([ownerId, { ownerName, layers: ols }]) => (
+            <div key={ownerId}>
+              {/* Cabecera del usuario */}
+              <div className="lp-owner">
+                <Avatar name={ownerName}/>
+                <span className="lp-owner-name">{ownerName}</span>
+              </div>
+              {[...ols].reverse().map(layer => {
+                const hidden = localHidden.has(layer.id);
+                return (
+                  <div key={layer.id} className="lp-item readonly">
+                    <div className="lp-thumb" style={{opacity:.5}}>{layer.id}</div>
+                    <div className="lp-info">
+                      <div className={`lp-name${hidden?" dim":""}`}
+                        style={{fontSize:11, color: hidden?"#333":"#666"}}>
+                        {layer.name}
+                      </div>
+                    </div>
+                    <div className="lp-ops">
+                      {/* Solo toggle visibilidad LOCAL */}
+                      <button
+                        className={`lp-ibtn${!hidden?" on":""}`}
+                        title={hidden?"Mostrar localmente":"Ocultar localmente"}
+                        onClick={() => toggleLocalHidden(layer.id)}
+                        style={{color: hidden?"#333":"#555"}}
+                      >{hidden?"◌":"👁"}</button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ))}
         </div>
 
         {/* Opacidad de capa activa */}
-        {(() => {
-          const al = layers.find(l => l.id === activeLayerId);
-          if (!al) return null;
-          return (
-            <div className="lp-opacity-row">
-              <div className="lp-opacity-label">
-                <span>Opacidad de capa</span>
-                <span style={{color:"#666"}}>{Math.round(al.opacity * 100)}%</span>
-              </div>
-              <input
-                type="range"
-                className="lp-opacity-slider"
-                min={0} max={100}
-                value={Math.round(al.opacity * 100)}
-                onChange={e => onOpacity(al.id, Number(e.target.value) / 100)}
-              />
+        {activeLayer && (
+          <div className="lp-opa-row">
+            <div className="lp-opa-lbl">
+              <span>Opacidad</span>
+              <span>{Math.round(activeLayer.opacity*100)}%</span>
             </div>
-          );
-        })()}
+            <input
+              type="range" className="lp-slider"
+              min={0} max={100}
+              value={Math.round(activeLayer.opacity*100)}
+              onChange={e => onOpacity(activeLayer.id, Number(e.target.value)/100)}
+            />
+          </div>
+        )}
       </div>
     </>
   );

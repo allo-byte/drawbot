@@ -8,22 +8,12 @@ import LayerPanel from "./components/LayerPanel";
 
 type Stroke = {
   points: {x:number;y:number}[];
-  color: string;
-  size: number;
-  opacity: number;
-  eraser: boolean;
-  brushType?: BrushType;
-  layerId?: number;
+  color: string; size: number; opacity: number;
+  eraser: boolean; brushType?: BrushType; layerId?: number;
 };
 
 const MAX_HISTORY       = 50;
 const MAX_COLOR_HISTORY = 8;
-
-let nextLayerId = 2; // 1 ya está usado por la capa inicial
-
-function makeLayer(id: number, name: string): Layer {
-  return { id, name, visible: true, opacity: 1, locked: false };
-}
 
 function App() {
   const [color,      setColorRaw ] = useState("#ffffff");
@@ -41,10 +31,10 @@ function App() {
   );
 
   // ── Capas ────────────────────────────────────────────────────────────────
-  const [layers, setLayers] = useState<Layer[]>([
-    makeLayer(1, "Capa 1"),
-  ]);
-  const [activeLayerId, setActiveLayerId] = useState(1);
+  const [layers,        setLayers       ] = useState<Layer[]>([]);
+  const [activeLayerId, setActiveLayerId] = useState<number>(-1);
+  // myUserId asignado por el servidor al hacer join
+  const [myUserId,      setMyUserId     ] = useState<string>("");
 
   const [colorHistory, setColorHistory] = useState<string[]>(() => {
     try { return JSON.parse(localStorage.getItem("drawbot-colors") || "[]"); }
@@ -102,7 +92,7 @@ function App() {
   const handleUndo = useCallback(() => {
     const api = canvasApiRef.current;
     if (!api || undoStackRef.current.length === 0) return;
-    const current  = api.getMyStrokes();
+    const current = api.getMyStrokes();
     redoStackRef.current = [...redoStackRef.current, [...current]];
     const snapshot = undoStackRef.current[undoStackRef.current.length - 1];
     undoStackRef.current = undoStackRef.current.slice(0, -1);
@@ -114,7 +104,7 @@ function App() {
   const handleRedo = useCallback(() => {
     const api = canvasApiRef.current;
     if (!api || redoStackRef.current.length === 0) return;
-    const current  = api.getMyStrokes();
+    const current = api.getMyStrokes();
     undoStackRef.current = [...undoStackRef.current, [...current]];
     const snapshot = redoStackRef.current[redoStackRef.current.length - 1];
     redoStackRef.current = redoStackRef.current.slice(0, -1);
@@ -130,7 +120,6 @@ function App() {
   handleRedoRef.current = handleRedo;
   savePNGRef.current    = savePNG;
 
-  // ── Atajos teclado ───────────────────────────────────────────────────────
   useEffect(() => {
     const match = (e: KeyboardEvent, shortcut: string) => {
       const parts = shortcut.split("+");
@@ -168,72 +157,121 @@ function App() {
   }, []);
 
   // ── Layer handlers ───────────────────────────────────────────────────────
-  const pushLayerUpdate = (newLayers: Layer[]) => {
-    setLayers(newLayers);
-    (Canvas as any)._sendLayerUpdate?.(newLayers);
-  };
+  // Mis capas
+  const myLayers = layers.filter(l => l.ownerId === myUserId);
 
   const handleAddLayer = () => {
-    const id   = nextLayerId++;
-    const name = `Capa ${id}`;
-    const nl   = [...layers, makeLayer(id, name)];
-    pushLayerUpdate(nl);
-    setActiveLayerId(id);
+    (Canvas as any)._sendWS?.({
+      type: "layer_add",
+      name: `Capa ${myLayers.length + 1}`,
+    });
   };
 
   const handleDeleteLayer = (id: number) => {
-    if (layers.length <= 1) return;
-    const nl = layers.filter(l => l.id !== id);
-    pushLayerUpdate(nl);
-    if (activeLayerId === id) setActiveLayerId(nl[nl.length - 1].id);
+    if (myLayers.length <= 1) return;
+    (Canvas as any)._sendWS?.({ type: "layer_delete", layerId: id });
+    // Optimista: cambiar activeLayer si era la eliminada
+    if (activeLayerId === id) {
+      const remaining = myLayers.filter(l => l.id !== id);
+      if (remaining.length > 0) setActiveLayerId(remaining[remaining.length - 1].id);
+    }
   };
 
   const handleToggleVisibility = (id: number) => {
-    const nl = layers.map(l => l.id===id ? {...l, visible:!l.visible} : l);
-    pushLayerUpdate(nl);
+    const updated = layers.map(l => l.id===id && l.ownerId===myUserId ? {...l, visible:!l.visible} : l);
+    setLayers(updated);
+    const myUpdated = updated.filter(l => l.ownerId === myUserId);
+    (Canvas as any)._sendWS?.({ type: "layer_update", layers: myUpdated });
   };
 
   const handleToggleLock = (id: number) => {
-    const nl = layers.map(l => l.id===id ? {...l, locked:!l.locked} : l);
-    pushLayerUpdate(nl);
+    const updated = layers.map(l => l.id===id && l.ownerId===myUserId ? {...l, locked:!l.locked} : l);
+    setLayers(updated);
+    const myUpdated = updated.filter(l => l.ownerId === myUserId);
+    (Canvas as any)._sendWS?.({ type: "layer_update", layers: myUpdated });
   };
 
   const handleRename = (id: number, name: string) => {
-    const nl = layers.map(l => l.id===id ? {...l, name} : l);
-    pushLayerUpdate(nl);
+    const updated = layers.map(l => l.id===id && l.ownerId===myUserId ? {...l, name} : l);
+    setLayers(updated);
+    const myUpdated = updated.filter(l => l.ownerId === myUserId);
+    (Canvas as any)._sendWS?.({ type: "layer_update", layers: myUpdated });
   };
 
   const handleReorder = (fromIdx: number, toIdx: number) => {
-    const nl = [...layers];
-    const [moved] = nl.splice(fromIdx, 1);
-    nl.splice(toIdx, 0, moved);
-    pushLayerUpdate(nl);
+    // Reordenar localmente solo mis capas
+    const mine = [...myLayers];
+    const [moved] = mine.splice(fromIdx, 1);
+    mine.splice(toIdx, 0, moved);
+    const others = layers.filter(l => l.ownerId !== myUserId);
+    setLayers([...others, ...mine]);
+    (Canvas as any)._sendWS?.({ type: "layer_reorder", fromIdx, toIdx });
   };
 
   const handleLayerOpacity = (id: number, opacity: number) => {
-    const nl = layers.map(l => l.id===id ? {...l, opacity} : l);
-    pushLayerUpdate(nl);
+    const updated = layers.map(l => l.id===id && l.ownerId===myUserId ? {...l, opacity} : l);
+    setLayers(updated);
+    const myUpdated = updated.filter(l => l.ownerId === myUserId);
+    (Canvas as any)._sendWS?.({ type: "layer_update", layers: myUpdated });
   };
 
-  // Capas recibidas desde el servidor (para sincronización colaborativa)
-  const handleLayersUpdate = useCallback((newLayers: Layer[]) => {
-    setLayers(newLayers);
-    // Ajustar nextLayerId para evitar colisiones
-    const maxId = Math.max(...newLayers.map(l => l.id));
-    if (maxId >= nextLayerId) nextLayerId = maxId + 1;
-  }, []);
+  // Callback desde Canvas cuando llegan eventos WS de capas
+  const handleLayerEvent = useCallback((event: {
+    type: string;
+    layers?: Layer[];
+    layer?: Layer;
+    layerId?: number;
+    myUserId?: string;
+    ownerId?: string;
+    order?: number[];
+  }) => {
+    if (event.type === "init_layers") {
+      setLayers(event.layers || []);
+      if (event.myUserId) setMyUserId(event.myUserId);
+      // Seleccionar mi primera capa como activa
+      const mine = (event.layers || []).filter(l => l.ownerId === event.myUserId);
+      if (mine.length > 0) setActiveLayerId(mine[0].id);
+    }
+    if (event.type === "layer_added") {
+      const l = event.layer!;
+      setLayers(prev => {
+        if (prev.find(x => x.id === l.id)) return prev;
+        const next = [...prev, l];
+        // Si es mía, seleccionarla
+        if (l.ownerId === myUserId) setActiveLayerId(l.id);
+        return next;
+      });
+    }
+    if (event.type === "layer_update") {
+      setLayers(prev => {
+        const incoming = event.layers || [];
+        const ownerId  = event.ownerId!;
+        const others   = prev.filter(l => l.ownerId !== ownerId);
+        return [...others, ...incoming];
+      });
+    }
+    if (event.type === "layer_deleted") {
+      setLayers(prev => prev.filter(l => l.id !== event.layerId));
+    }
+    if (event.type === "layer_reorder") {
+      setLayers(prev => {
+        const ownerId = event.ownerId!;
+        const order   = event.order!;
+        const others  = prev.filter(l => l.ownerId !== ownerId);
+        const mine    = order.map(id => prev.find(l => l.id === id)!).filter(Boolean);
+        return [...others, ...mine];
+      });
+    }
+  }, [myUserId]);
 
   const room = new URLSearchParams(window.location.search).get("room") || "default";
+  const createRoom = () => { window.location.href = `/?room=${Math.random().toString(36).substring(2,8)}`; };
+  const copyRoomLink = async () => { await navigator.clipboard.writeText(window.location.href); alert("✅ Enlace copiado"); };
 
-  const createRoom = () => {
-    const newRoom = Math.random().toString(36).substring(2, 8);
-    window.location.href = `/?room=${newRoom}`;
-  };
-
-  const copyRoomLink = async () => {
-    await navigator.clipboard.writeText(window.location.href);
-    alert("✅ Enlace copiado");
-  };
+  // activeLayerId válido: si no existe entre mis capas, usar el primero
+  const safeActiveId = myLayers.find(l => l.id === activeLayerId)
+    ? activeLayerId
+    : (myLayers[0]?.id ?? -1);
 
   return (
     <>
@@ -250,7 +288,7 @@ function App() {
         onUndo={handleUndo} onRedo={handleRedo}
         canUndo={undoLen > 0} canRedo={redoLen > 0}
         bgColor={bgColor}
-        setBgColor={(c: string) => { setBgColor(c); (Canvas as any)._sendBgColor(c); }}
+        setBgColor={(c: string) => { setBgColor(c); (Canvas as any)._sendBgColor?.(c); }}
         savePNG={savePNG}
         users={users} username={username} setUsername={setUsername}
         room={room} createRoom={createRoom} copyRoomLink={copyRoomLink}
@@ -262,26 +300,29 @@ function App() {
         panMode={panMode} bgColor={bgColor}
         canvasSize={canvasSize}
         layers={layers}
-        activeLayerId={activeLayerId}
+        activeLayerId={safeActiveId}
         setUsers={setUsers}
         onReady={(saveFn, _uploadFn) => setSavePNG(() => saveFn)}
         onBgColor={(c) => setBgColor(c)}
         onStrokeAdded={onStrokeAdded}
         onStrokeFinished={onStrokeFinished}
-        onLayersUpdate={handleLayersUpdate}
+        onLayerEvent={handleLayerEvent}
       />
-      <LayerPanel
-        layers={layers}
-        activeLayerId={activeLayerId}
-        onSelect={setActiveLayerId}
-        onAdd={handleAddLayer}
-        onDelete={handleDeleteLayer}
-        onToggleVisibility={handleToggleVisibility}
-        onToggleLock={handleToggleLock}
-        onRename={handleRename}
-        onReorder={handleReorder}
-        onOpacity={handleLayerOpacity}
-      />
+      {myUserId && (
+        <LayerPanel
+          layers={layers}
+          activeLayerId={safeActiveId}
+          myUserId={myUserId}
+          onSelect={setActiveLayerId}
+          onAdd={handleAddLayer}
+          onDelete={handleDeleteLayer}
+          onToggleVisibility={handleToggleVisibility}
+          onToggleLock={handleToggleLock}
+          onRename={handleRename}
+          onReorder={handleReorder}
+          onOpacity={handleLayerOpacity}
+        />
+      )}
     </>
   );
 }
