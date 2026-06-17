@@ -377,10 +377,14 @@ export default function Canvas({
   useEffect(() => {
     const canvas = canvasRef.current; if(!canvas) return;
     const dpr = window.devicePixelRatio||1;
-    canvas.width  = (window.innerWidth-52)*dpr;
-    canvas.height = (window.innerHeight-52)*dpr;
-    canvas.style.width  = (window.innerWidth-252)+"px";
-    canvas.style.height = (window.innerHeight-52)+"px";
+    // CSS size: descontar toolbar izq (52px) + panel capas der (200px)
+    const cssW = window.innerWidth - 52 - 200;
+    const cssH = window.innerHeight - 52;
+    canvas.style.width  = cssW + "px";
+    canvas.style.height = cssH + "px";
+    // Píxeles físicos = CSS * DPR
+    canvas.width  = Math.round(cssW * dpr);
+    canvas.height = Math.round(cssH * dpr);
 
     const room     = new URLSearchParams(window.location.search).get("room")||"default";
     const protocol = window.location.protocol==="https:"?"wss:":"ws:";
@@ -502,10 +506,37 @@ export default function Canvas({
       }
     };
 
+    const getPos=(e:PointerEvent)=>{
+      const rect=canvas.getBoundingClientRect();
+      // En Safari/iPad, getBoundingClientRect puede tener offset por visualViewport
+      // Usamos el rect directamente — clientX/Y ya están en el mismo espacio
+      return {
+        x: e.clientX - rect.left,
+        y: e.clientY - rect.top,
+      };
+    };
+
+    // Fix iPad: recalcular tamaño cuando cambia el visualViewport (zoom del sistema)
+    const onViewportResize = () => {
+      const dpr2  = window.devicePixelRatio || 1;
+      const vp    = (window as any).visualViewport;
+      const vpW   = vp ? vp.width  : window.innerWidth;
+      const vpH   = vp ? vp.height : window.innerHeight;
+      const cssW2 = vpW - 52 - 200;
+      const cssH2 = vpH - 52;
+      canvas.style.width  = cssW2 + "px";
+      canvas.style.height = cssH2 + "px";
+      canvas.width  = Math.round(cssW2 * dpr2);
+      canvas.height = Math.round(cssH2 * dpr2);
+      requestFrame();
+    };
+    if ((window as any).visualViewport) {
+      (window as any).visualViewport.addEventListener("resize", onViewportResize);
+    }
+
     const onPointerDown=(e:PointerEvent)=>{
       canvas.setPointerCapture(e.pointerId);
-      const rect=canvas.getBoundingClientRect();
-      const pos={x:e.clientX-rect.left,y:e.clientY-rect.top};
+      const pos=getPos(e);
       if(e.pointerType==="pen"||e.pointerType==="mouse"){
         if(panModeRef.current){panStartRef.current={x:pos.x,y:pos.y,vx:viewRef.current.x,vy:viewRef.current.y};return;}
         startStroke(pos);return;
@@ -520,8 +551,7 @@ export default function Canvas({
     };
 
     const onPointerMove=(e:PointerEvent)=>{
-      const rect=canvas.getBoundingClientRect();
-      const pos={x:e.clientX-rect.left,y:e.clientY-rect.top};
+      const pos=getPos(e);
       if(e.pointerType==="pen"||e.pointerType==="mouse"){
         if(panModeRef.current&&panStartRef.current){
           viewRef.current={...viewRef.current,x:panStartRef.current.vx+(pos.x-panStartRef.current.x),y:panStartRef.current.vy+(pos.y-panStartRef.current.y)};
@@ -605,7 +635,9 @@ export default function Canvas({
     const onWheel=(e:WheelEvent)=>{
       e.preventDefault();
       const rect=canvas.getBoundingClientRect();
-      const mx=e.clientX-rect.left,my=e.clientY-rect.top,v=viewRef.current;
+      const mx=e.clientX-rect.left;
+      const my=e.clientY-rect.top;
+      const v=viewRef.current;
       const delta=e.deltaY<0?1.12:0.9;
       const ns=Math.min(MAX_SCALE,Math.max(MIN_SCALE,v.scale*delta));
       viewRef.current={x:mx-(mx-v.x)*(ns/v.scale),y:my-(my-v.y)*(ns/v.scale),scale:ns};
@@ -667,6 +699,19 @@ export default function Canvas({
 
     onReady?.(savePNG,uploadImage);
 
+    // Actualizar tamaño en resize
+    const onResize = () => {
+      const dpr2 = window.devicePixelRatio || 1;
+      const cssW2 = window.innerWidth - 52 - 200;
+      const cssH2 = window.innerHeight - 52;
+      canvas.style.width  = cssW2 + "px";
+      canvas.style.height = cssH2 + "px";
+      canvas.width  = Math.round(cssW2 * dpr2);
+      canvas.height = Math.round(cssH2 * dpr2);
+      requestFrame();
+    };
+    window.addEventListener("resize", onResize);
+
     return ()=>{
       if(rafRef.current)cancelAnimationFrame(rafRef.current);
       wsRef.current?.close();
@@ -675,6 +720,10 @@ export default function Canvas({
       canvas.removeEventListener("pointerup",    onPointerUp);
       canvas.removeEventListener("pointercancel",onPointerUp);
       canvas.removeEventListener("wheel",        onWheel);
+      window.removeEventListener("resize", onResize);
+      if ((window as any).visualViewport) {
+        (window as any).visualViewport.removeEventListener("resize", onViewportResize);
+      }
     };
   },[]);
 
@@ -693,8 +742,8 @@ export default function Canvas({
       ref={canvasRef}
       style={{
         position:"fixed", top:52, left:52,
-        width:"calc(100vw - 252px)",
-        height:"calc(100vh - 52px)",
+        // El tamaño real lo setea el JS (resize-aware, DPR-aware)
+        // No usamos CSS calc() para evitar desfases con canvas.width
         display:"block",
         cursor:panMode?"grab":"crosshair",
         touchAction:"none",
