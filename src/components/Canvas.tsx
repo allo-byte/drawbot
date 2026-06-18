@@ -149,6 +149,7 @@ export default function Canvas({
   const imagesRef         = useRef<CanvasImage[]>([]);
   // Visibilidad LOCAL de capas ajenas (no viene del servidor)
   const localHiddenRef    = useRef<Set<number>>(new Set());
+  const myUserIdRef       = useRef<string>("");  // asignado en init
 
   const colorRef       = useRef(color);
   const sizeRef        = useRef(brushSize);
@@ -165,7 +166,12 @@ export default function Canvas({
   const lastSentMsRef  = useRef(0);
   const viewRef        = useRef({ x:0, y:0, scale:1 });
   const touchPtrsRef   = useRef<Map<number,{x:number;y:number}>>(new Map());
-  const gestureRef     = useRef<{time:number;maxFingers:number;moved:boolean}|null>(null);
+  // fingerMoves: acumula distancia POR dedo para no cancelar gestos por micro-movimientos
+  const gestureRef     = useRef<{
+    time: number;
+    maxFingers: number;
+    fingerMoves: Map<number, number>;
+  } | null>(null);
 
   const onStrokeAddedRef    = useRef(onStrokeAdded);
   const onStrokeFinishedRef = useRef(onStrokeFinished);
@@ -188,7 +194,7 @@ export default function Canvas({
   onConnectionChangeRef.current  = onConnectionChange;
 
   const MIN_SCALE = 0.05, MAX_SCALE = 10;
-  const GESTURE_MS = 350, GESTURE_PX = 12;
+  const GESTURE_MS = 500, GESTURE_PX = 22; // más tolerante para iPad
   const STREAM_PTS = 3,   STREAM_MS  = 32;
 
   const toWorld = (sx:number, sy:number) => {
@@ -515,6 +521,7 @@ export default function Canvas({
         strokesRef.current = data.strokes||[];
         imagesRef.current  = data.images ||[];
         if (data.bgColor) onBgColor?.(data.bgColor);
+        if (data.myUserId) myUserIdRef.current = data.myUserId;
         onLayerEventRef.current?.({
           type:"init_layers",
           layers: data.layers||[],
@@ -676,11 +683,19 @@ export default function Canvas({
       }
       touchPtrsRef.current.set(e.pointerId,pos);
       const count=touchPtrsRef.current.size;
-      if(count===1)gestureRef.current={time:performance.now(),maxFingers:1,moved:false};
-      else if(gestureRef.current)gestureRef.current.maxFingers=Math.max(gestureRef.current.maxFingers,count);
-      if(count===2){currentStrokeRef.current=null;const info=getPinchInfo();lastPinchDist=info.dist;lastPinchMid=info.mid;return;}
-      if(count===3){currentStrokeRef.current=null;return;}
-      if(count===1)startStroke(pos);
+
+      if(count===1){
+        // NO iniciar trazo aquí — esperar a onPointerMove para ver si llega un 2º dedo
+        gestureRef.current={time:performance.now(),maxFingers:1,fingerMoves:new Map([[e.pointerId,0]])};
+        return;
+      }
+      // 2+ dedos: cancelar trazo activo, registrar gesto
+      currentStrokeRef.current=null;
+      if(gestureRef.current){
+        gestureRef.current.maxFingers=Math.max(gestureRef.current.maxFingers,count);
+        gestureRef.current.fingerMoves.set(e.pointerId,0);
+      }
+      if(count===2){const info=getPinchInfo();lastPinchDist=info.dist;lastPinchMid=info.mid;}
     };
 
     const onPointerMove=(e:PointerEvent)=>{
@@ -698,11 +713,18 @@ export default function Canvas({
         streamStroke();requestFrame();return;
       }
       const prev=touchPtrsRef.current.get(e.pointerId);
+      // Acumular distancia POR dedo (no bool global)
       if(prev&&gestureRef.current){
         const dx=pos.x-prev.x,dy=pos.y-prev.y;
-        if(Math.sqrt(dx*dx+dy*dy)>GESTURE_PX)gestureRef.current.moved=true;
+        const dist=Math.sqrt(dx*dx+dy*dy);
+        const cur=gestureRef.current.fingerMoves.get(e.pointerId)??0;
+        gestureRef.current.fingerMoves.set(e.pointerId,cur+dist);
       }
       touchPtrsRef.current.set(e.pointerId,pos);
+      // Iniciar trazo AQUÍ si sigue siendo 1 dedo (diferido desde pointerdown)
+      if(touchPtrsRef.current.size===1&&!currentStrokeRef.current){
+        startStroke(pos);
+      }
       if(touchPtrsRef.current.size===2){
         const info=getPinchInfo(),v=viewRef.current;
         const sr=info.dist/lastPinchDist;
@@ -726,24 +748,27 @@ export default function Canvas({
       if(!currentStrokeRef.current)return;
       const stroke=currentStrokeRef.current;
       currentStrokeRef.current=null;
-      strokesRef.current.push(stroke);
-      myStrokesRef.current=[...myStrokesRef.current,stroke];
+      // Marcar con _uid para que undo_sync_remote sepa qué strokes son míos
+      const markedStroke = {...stroke, _uid: myUserIdRef.current};
+      strokesRef.current.push(markedStroke);
+      myStrokesRef.current=[...myStrokesRef.current,markedStroke];
       drawStroke(getLayerCtx(stroke.layerId??-1),stroke);
       if(wsRef.current?.readyState===WebSocket.OPEN)
         wsRef.current.send(JSON.stringify({type:"stroke",stroke}));
       if(!stroke.eraser)onStrokeFinishedRef.current?.(stroke.color);
       const getMyStrokes=()=>myStrokesRef.current;
       const setMyStrokes=(newMine:Stroke[])=>{
-        const others=strokesRef.current.filter(s=>!myStrokesRef.current.includes(s));
-        myStrokesRef.current=newMine;
-        strokesRef.current=[...others,...newMine];
-        // Reconstruir solo capas afectadas por mis strokes
-        const myLayerIds = new Set(newMine.map(s => s.layerId ?? -1));
+        // Marcar mis strokes con _uid para sincronización
+        const uid = myUserIdRef.current;
+        const marked = newMine.map(s => ({...s, _uid: uid}));
+        const others=strokesRef.current.filter((s:any)=>s._uid!==uid);
+        myStrokesRef.current=marked;
+        strokesRef.current=[...others,...marked];
+        const myLayerIds = new Set(marked.map((s:any) => s.layerId ?? -1));
         myLayerIds.forEach(id => rebuildLayerCanvas(id));
         requestFrame();
-        // FIX #2: enviar solo mis strokes, no todos los de la sala
         if(wsRef.current?.readyState===WebSocket.OPEN)
-          wsRef.current.send(JSON.stringify({type:"undo_sync",strokes:newMine}));
+          wsRef.current.send(JSON.stringify({type:"undo_sync",strokes:marked}));
       };
       onStrokeAddedRef.current?.(getMyStrokes,setMyStrokes);
       requestFrame();
@@ -757,10 +782,12 @@ export default function Canvas({
       }
       touchPtrsRef.current.delete(e.pointerId);
       if(touchPtrsRef.current.size===0&&gestureRef.current){
-        const{time,maxFingers,moved}=gestureRef.current;
+        const{time,maxFingers,fingerMoves}=gestureRef.current;
         const elapsed=performance.now()-time;
         gestureRef.current=null;
-        if(!moved&&elapsed<GESTURE_MS){
+        // Gesto válido: tiempo < GESTURE_MS Y ningún dedo se movió más de GESTURE_PX
+        const maxMove=Math.max(0,...Array.from(fingerMoves.values()));
+        if(elapsed<GESTURE_MS&&maxMove<GESTURE_PX){
           if(maxFingers===2){window.dispatchEvent(new CustomEvent("drawbot:undo"));return;}
           if(maxFingers===3){window.dispatchEvent(new CustomEvent("drawbot:redo"));return;}
         }
@@ -783,7 +810,14 @@ export default function Canvas({
     canvas.addEventListener("pointerdown",  onPointerDown);
     canvas.addEventListener("pointermove",  onPointerMove);
     canvas.addEventListener("pointerup",    onPointerUp);
-    canvas.addEventListener("pointercancel",onPointerUp);
+    const onPointerCancel=(e:PointerEvent)=>{
+      touchPtrsRef.current.delete(e.pointerId);
+      if(touchPtrsRef.current.size===0){
+        currentStrokeRef.current=null;
+        gestureRef.current=null;
+      }
+    };
+    canvas.addEventListener("pointercancel",onPointerCancel);
     canvas.addEventListener("wheel",        onWheel,{passive:false});
 
     const savePNG=()=>{
@@ -852,7 +886,7 @@ export default function Canvas({
       canvas.removeEventListener("pointerdown",  onPointerDown);
       canvas.removeEventListener("pointermove",  onPointerMove);
       canvas.removeEventListener("pointerup",    onPointerUp);
-      canvas.removeEventListener("pointercancel",onPointerUp);
+      canvas.removeEventListener("pointercancel",onPointerCancel);
       canvas.removeEventListener("wheel",        onWheel);
       window.removeEventListener("resize", onResize);
       if ((window as any).visualViewport) {
