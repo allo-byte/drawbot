@@ -2,6 +2,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import { createServer } from "http";
 import { readFileSync, existsSync } from "fs";
 import { join, extname } from "path";
+import { createClient } from "@supabase/supabase-js";
 
 type Point  = { x: number; y: number };
 type Stroke = { _sid?: string; points: Point[]; color: string; size: number; opacity: number; eraser: boolean; layerId?: number; _uid?: string; };
@@ -12,8 +13,19 @@ const port     = Number(process.env.PORT) || 3001;
 const distPath = join(process.cwd(), "dist");
 const MAX_STROKES = 6000;
 
+// ── Supabase (opcional — si no hay variables, corre en modo RAM) ──────────
+const supabase = process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY
+  ? createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY, {
+      auth: { persistSession: false },
+    })
+  : null;
+
 console.log(`📁 Serving dist from: ${distPath}`);
-console.log(`🚀 PeonyPaint running on :${port} (memoria — sin DB externa)`);
+console.log(supabase
+  ? "✅ Supabase conectado — persistencia activa"
+  : "⚠️  Sin Supabase — modo solo RAM"
+);
+console.log(`🚀 PeonyPaint running on :${port}`);
 
 const mimeTypes: Record<string, string> = {
   ".html":"text/html",".js":"application/javascript",".css":"text/css",
@@ -40,11 +52,92 @@ const roomUsers    = new Map<string, Map<string, string>>();
 const roomBgColor  = new Map<string, string>();
 const roomLayers   = new Map<string, Layer[]>();
 const roomImages   = new Map<string, RoomImage[]>();
+const roomLoaded   = new Set<string>(); // rooms ya cargadas desde DB
 const cursorThrottle = new Map<string, number>();
 const CURSOR_MS = 50;
 
 let globalLayerId = 100;
 let imageIdSeq    = 1;
+
+// ── Helpers DB ────────────────────────────────────────────────────────────
+
+async function ensureRoom(roomId: string) {
+  if (!supabase) return;
+  await supabase.from("rooms").upsert({ id: roomId }, { onConflict: "id", ignoreDuplicates: true });
+}
+
+async function loadRoomFromDB(roomId: string) {
+  if (!supabase || roomLoaded.has(roomId)) return;
+  roomLoaded.add(roomId);
+
+  await ensureRoom(roomId);
+
+  // Cargar color de fondo
+  const { data: room } = await supabase
+    .from("rooms").select("bg_color").eq("id", roomId).single();
+  if (room?.bg_color) roomBgColor.set(roomId, room.bg_color);
+
+  // Cargar strokes
+  const { data: strokes } = await supabase
+    .from("strokes").select("data").eq("room_id", roomId).order("created_at");
+  if (strokes?.length) {
+    roomStrokes.set(roomId, strokes.map(r => r.data as Stroke));
+  }
+
+  // Cargar capas
+  const { data: layers } = await supabase
+    .from("layers").select("data").eq("room_id", roomId);
+  if (layers?.length) {
+    roomLayers.set(roomId, layers.map(r => r.data as Layer));
+    // Actualizar globalLayerId para evitar colisiones
+    const maxId = Math.max(...layers.map(r => (r.data as Layer).id));
+    if (maxId > globalLayerId) globalLayerId = maxId;
+  }
+}
+
+async function saveStroke(roomId: string, stroke: Stroke) {
+  if (!supabase || !stroke._sid) return;
+  await supabase.from("strokes").upsert({
+    room_id: roomId,
+    sid: stroke._sid,
+    uid: stroke._uid || "",
+    data: stroke,
+  }, { onConflict: "sid" });
+}
+
+async function saveLayer(roomId: string, layer: Layer) {
+  if (!supabase) return;
+  await supabase.from("layers").upsert({
+    id: layer.id,
+    room_id: roomId,
+    data: layer,
+    updated_at: new Date().toISOString(),
+  }, { onConflict: "id" });
+}
+
+async function deleteLayer(layerId: number) {
+  if (!supabase) return;
+  await supabase.from("layers").delete().eq("id", layerId);
+}
+
+async function saveBgColor(roomId: string, color: string) {
+  if (!supabase) return;
+  await supabase.from("rooms").upsert({ id: roomId, bg_color: color, updated_at: new Date().toISOString() }, { onConflict: "id" });
+}
+
+async function syncUndoStrokes(roomId: string, uid: string, strokes: Stroke[]) {
+  if (!supabase) return;
+  // Borrar strokes anteriores de este usuario en esta sala
+  await supabase.from("strokes").delete().eq("room_id", roomId).eq("uid", uid);
+  // Insertar los nuevos
+  if (strokes.length > 0) {
+    await supabase.from("strokes").insert(
+      strokes.map(s => ({ room_id: roomId, sid: s._sid, uid, data: s }))
+    );
+  }
+}
+
+// ── Helpers WS ────────────────────────────────────────────────────────────
 
 function broadcast(roomId: string, sender: WebSocket | null, msg: object) {
   const str = JSON.stringify(msg);
@@ -64,12 +157,14 @@ function getLayerLimit(canvasW: number, canvasH: number): number {
   return 2;
 }
 
+// ── WebSocket ─────────────────────────────────────────────────────────────
+
 wss.on("connection", (ws: WebSocket) => {
   let roomId   = "default";
   let username = "Invitado";
   const userId = Math.random().toString(36).substring(2, 9);
 
-  ws.on("message", (raw: Buffer) => {
+  ws.on("message", async (raw: Buffer) => {
     let data: any;
     try { data = JSON.parse(raw.toString()); } catch { return; }
 
@@ -82,8 +177,12 @@ wss.on("connection", (ws: WebSocket) => {
       if (!rooms.has(roomId))       rooms.set(roomId, new Set());
       if (!roomStrokes.has(roomId)) roomStrokes.set(roomId, []);
       if (!roomUsers.has(roomId))   roomUsers.set(roomId, new Map());
-      if (!roomLayers.has(roomId))  roomLayers.set(roomId, []);
       if (!roomImages.has(roomId))  roomImages.set(roomId, []);
+
+      // Cargar desde DB si es la primera vez que se abre esta sala
+      await loadRoomFromDB(roomId);
+
+      if (!roomLayers.has(roomId))  roomLayers.set(roomId, []);
 
       rooms.get(roomId)!.add(ws);
       roomUsers.get(roomId)!.set(userId, username);
@@ -91,13 +190,18 @@ wss.on("connection", (ws: WebSocket) => {
       const layers  = roomLayers.get(roomId)!;
       const myLayer = layers.find(l => l.ownerId === userId);
       if (!myLayer) {
-        const nl: Layer = { id: ++globalLayerId, name: "Capa 1", visible: true, opacity: 1, locked: false, ownerId: userId, ownerName: username };
+        const nl: Layer = {
+          id: ++globalLayerId,
+          name: "Capa 1", visible: true, opacity: 1, locked: false,
+          ownerId: userId, ownerName: username,
+        };
         layers.push(nl);
+        saveLayer(roomId, nl); // fire-and-forget
         broadcast(roomId, ws, { type: "layer_added", layer: nl });
       }
 
       ws.send(JSON.stringify({
-        type: "init",
+        type:     "init",
         strokes:  roomStrokes.get(roomId) || [],
         images:   roomImages.get(roomId)  || [],
         bgColor:  roomBgColor.get(roomId) || null,
@@ -116,7 +220,12 @@ wss.on("connection", (ws: WebSocket) => {
       username = name;
       roomUsers.get(roomId)?.set(userId, name);
       const layers = roomLayers.get(roomId);
-      if (layers) layers.forEach(l => { if (l.ownerId === userId) l.ownerName = name; });
+      if (layers) layers.forEach(l => {
+        if (l.ownerId === userId) {
+          l.ownerName = name;
+          saveLayer(roomId, l);
+        }
+      });
       const users = Array.from(roomUsers.get(roomId)?.values() || []);
       broadcastAll(roomId, { type: "users", users });
       const myLayers = layers?.filter(l => l.ownerId === userId) || [];
@@ -132,6 +241,7 @@ wss.on("connection", (ws: WebSocket) => {
         const keep = Math.floor(MAX_STROKES * 0.8);
         roomStrokes.set(roomId, list.slice(list.length - keep));
       }
+      saveStroke(roomId, stroke); // fire-and-forget
       broadcast(roomId, ws, { type: "stroke", stroke: data.stroke, userId });
       return;
     }
@@ -141,12 +251,16 @@ wss.on("connection", (ws: WebSocket) => {
     if (data.type === "clear") {
       roomStrokes.set(roomId, []);
       roomImages.set(roomId, []);
+      if (supabase) {
+        supabase.from("strokes").delete().eq("room_id", roomId).then();
+      }
       broadcastAll(roomId, { type: "clear" });
       return;
     }
 
     if (data.type === "bgcolor") {
       roomBgColor.set(roomId, data.color);
+      saveBgColor(roomId, data.color); // fire-and-forget
       broadcast(roomId, ws, { type: "bgcolor", color: data.color });
       return;
     }
@@ -161,13 +275,13 @@ wss.on("connection", (ws: WebSocket) => {
       return;
     }
 
-    // FIX clave: undo_sync ahora reemplaza por _sid también para evitar duplicados
     if (data.type === "undo_sync") {
       const list   = roomStrokes.get(roomId) || [];
       const others = list.filter((s: any) => s._uid !== userId);
       const mine   = (data.strokes || []).map((s: any) => ({ ...s, _uid: userId }));
       roomStrokes.set(roomId, [...others, ...mine]);
       const affectedLayers = [...new Set(mine.map((s: any) => s.layerId).filter((v: any) => v != null))];
+      syncUndoStrokes(roomId, userId, mine); // fire-and-forget
       broadcast(roomId, ws, { type: "undo_sync_remote", strokes: mine, userId, affectedLayers });
       return;
     }
@@ -184,6 +298,7 @@ wss.on("connection", (ws: WebSocket) => {
         ownerId: userId, ownerName: username,
       };
       layers.push(nl);
+      saveLayer(roomId, nl); // fire-and-forget
       broadcastAll(roomId, { type: "layer_added", layer: nl });
       return;
     }
@@ -193,6 +308,7 @@ wss.on("connection", (ws: WebSocket) => {
       const incoming = (data.layers as Layer[]).filter(l => l.ownerId === userId);
       const others   = layers.filter(l => l.ownerId !== userId);
       roomLayers.set(roomId, [...others, ...incoming]);
+      incoming.forEach(l => saveLayer(roomId, l)); // fire-and-forget
       broadcast(roomId, ws, { type: "layer_update", layers: incoming, ownerId: userId });
       return;
     }
@@ -202,6 +318,7 @@ wss.on("connection", (ws: WebSocket) => {
       const myLayers = layers.filter(l => l.ownerId === userId);
       if (myLayers.length <= 1) return;
       roomLayers.set(roomId, layers.filter(l => l.id !== data.layerId || l.ownerId !== userId));
+      deleteLayer(data.layerId); // fire-and-forget
       broadcastAll(roomId, { type: "layer_deleted", layerId: data.layerId });
       return;
     }
@@ -217,6 +334,7 @@ wss.on("connection", (ws: WebSocket) => {
       if (!m) return;
       r.splice(toIdx, 0, m);
       roomLayers.set(roomId, [...others, ...r]);
+      r.forEach(l => saveLayer(roomId, l)); // fire-and-forget
       broadcast(roomId, ws, { type: "layer_reorder", ownerId: userId, order: r.map(l => l.id) });
       return;
     }
