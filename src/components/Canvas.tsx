@@ -7,13 +7,11 @@ export type BrushType =
   | "airbrush" | "oil" | "crayon" | "marker" | "pencil";
 
 type Stroke = {
-  points:    Point[];
-  color:     string;
-  size:      number;
-  opacity:   number;
-  eraser:    boolean;
-  brushType?: BrushType;
-  layerId?:  number;
+  _sid?: string; // ID único local — clave del fix de undo/redo
+  points: Point[];
+  color: string; size: number; opacity: number;
+  eraser: boolean; brushType?: BrushType; layerId?: number;
+  _uid?: string;
 };
 
 export type BlendMode =
@@ -23,58 +21,25 @@ export type BlendMode =
   | "hue" | "color" | "add" | "subtract" | "divide" | "lighter-color";
 
 export type Layer = {
-  id:        number;
-  name:      string;
-  visible:   boolean;
-  opacity:   number;
-  locked:    boolean;
-  ownerId:   string;
-  ownerName: string;
-  blendMode?: BlendMode;  // default = "normal"
+  id: number; name: string; visible: boolean; opacity: number;
+  locked: boolean; ownerId: string; ownerName: string; blendMode?: BlendMode;
 };
 
-// Mapa de BlendMode → GlobalCompositeOperation del canvas
 const BLEND_CSS: Record<string, GlobalCompositeOperation> = {
-  "normal":       "source-over",
-  "multiply":     "multiply",
-  "screen":       "screen",
-  "overlay":      "overlay",
-  "darken":       "darken",
-  "lighten":      "lighten",
-  "color-dodge":  "color-dodge",
-  "color-burn":   "color-burn",
-  "hard-light":   "hard-light",
-  "soft-light":   "soft-light",
-  "difference":   "difference",
-  "exclusion":    "exclusion",
-  "hue":          "hue",
-  "color":        "color",
-  "add":          "lighter",
-  "subtract":     "difference",
-  "divide":       "color-dodge",
-  "lighter-color":"lighten",
+  "normal":"source-over","multiply":"multiply","screen":"screen","overlay":"overlay",
+  "darken":"darken","lighten":"lighten","color-dodge":"color-dodge","color-burn":"color-burn",
+  "hard-light":"hard-light","soft-light":"soft-light","difference":"difference","exclusion":"exclusion",
+  "hue":"hue","color":"color","add":"lighter","subtract":"difference","divide":"color-dodge","lighter-color":"lighten",
 };
+function getBlendCSS(mode?: BlendMode): GlobalCompositeOperation { return BLEND_CSS[mode ?? "normal"] ?? "source-over"; }
 
-function getBlendCSS(mode?: BlendMode): GlobalCompositeOperation {
-  return BLEND_CSS[mode ?? "normal"] ?? "source-over";
-}
-
-export type CanvasImage = {
-  id: number; data: string;
-  x: number; y: number; w: number; h: number;
-};
-
+export type CanvasImage = { id: number; data: string; x: number; y: number; w: number; h: number; };
 type Cursor = { x: number; y: number; userId: string };
 export type CanvasSize = { w: number; h: number } | null;
 
 type LayerEvent = {
-  type: string;
-  layers?: Layer[];
-  layer?: Layer;
-  layerId?: number;
-  myUserId?: string;
-  ownerId?: string;
-  order?: number[];
+  type: string; layers?: Layer[]; layer?: Layer;
+  layerId?: number; myUserId?: string; ownerId?: string; order?: number[];
 };
 
 type Props = {
@@ -83,7 +48,7 @@ type Props = {
   username: string; bgColor: string; canvasSize: CanvasSize;
   layers: Layer[]; activeLayerId: number;
   setUsers?: (users: string[]) => void;
-  onReady?:  (saveFn: () => void, uploadFn: (file: File) => void) => void;
+  onReady?: (saveFn: () => void, uploadFn: (file: File) => void) => void;
   onBgColor?: (color: string) => void;
   onStrokeAdded?: (get: () => Stroke[], set: (s: Stroke[]) => void) => void;
   onStrokeFinished?: (color: string) => void;
@@ -91,7 +56,6 @@ type Props = {
   onConnectionChange?: (status: "connected"|"disconnected"|"reconnecting") => void;
 };
 
-// ── utils ─────────────────────────────────────────────────────────────────
 function hexRgb(hex: string) {
   const c = hex.replace("#","");
   return { r:parseInt(c.slice(0,2),16), g:parseInt(c.slice(2,4),16), b:parseInt(c.slice(4,6),16) };
@@ -101,6 +65,11 @@ function prng(seed: number) {
   s = Math.imul(s ^ (s>>>16), 0x45d9f3b) >>> 0;
   s = Math.imul(s ^ (s>>>16), 0x45d9f3b) >>> 0;
   return (s>>>0) / 0xffffffff;
+}
+// Generador simple de IDs únicos por stroke (no requiere uuid lib)
+let sidCounter = 0;
+function genSid(): string {
+  return `${Date.now().toString(36)}-${(sidCounter++).toString(36)}-${Math.random().toString(36).slice(2,7)}`;
 }
 
 const stampCache = new Map<string, HTMLCanvasElement>();
@@ -124,9 +93,7 @@ function getCachedImage(img: CanvasImage): HTMLImageElement | null {
   return null;
 }
 
-// Tamaño de offscreen dinámico — se ajusta al canvasSize
-// No usamos 4096x4096 fijo para ahorrar memoria
-const DEFAULT_W = 2388; // iPad landscape
+const DEFAULT_W = 2388;
 const DEFAULT_H = 1668;
 
 export default function Canvas({
@@ -147,9 +114,8 @@ export default function Canvas({
   const currentStrokeRef  = useRef<Stroke | null>(null);
   const rafRef            = useRef<number | null>(null);
   const imagesRef         = useRef<CanvasImage[]>([]);
-  // Visibilidad LOCAL de capas ajenas (no viene del servidor)
   const localHiddenRef    = useRef<Set<number>>(new Set());
-  const myUserIdRef       = useRef<string>("");  // asignado en init
+  const myUserIdRef       = useRef<string>("");
 
   const colorRef       = useRef(color);
   const sizeRef        = useRef(brushSize);
@@ -166,36 +132,41 @@ export default function Canvas({
   const lastSentMsRef  = useRef(0);
   const viewRef        = useRef({ x:0, y:0, scale:1 });
   const touchPtrsRef   = useRef<Map<number,{x:number;y:number}>>(new Map());
-  // fingerMoves: acumula distancia POR dedo para no cancelar gestos por micro-movimientos
-  const gestureRef     = useRef<{
+
+  // ── FIX gestos: estado de gesto más robusto ─────────────────────────────
+  // pendingSingleTouch: guarda el primer toque sin iniciar trazo inmediatamente.
+  // Solo se confirma como "trazo de dibujo" tras un pequeño delay (FREEZE_MS)
+  // o en cuanto se mueve más de DRAW_THRESHOLD_PX — lo que ocurra primero.
+  // Esto da tiempo a que lleguen el 2º/3er dedo antes de comprometernos a dibujar.
+  const gestureRef = useRef<{
     time: number;
     maxFingers: number;
     fingerMoves: Map<number, number>;
+    drawCommitted: boolean;     // true cuando ya decidimos que es un trazo
+    firstPos: {x:number;y:number} | null;
   } | null>(null);
+  const pendingDrawTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const onStrokeAddedRef    = useRef(onStrokeAdded);
-  const onStrokeFinishedRef = useRef(onStrokeFinished);
+  const onStrokeAddedRef       = useRef(onStrokeAdded);
+  const onStrokeFinishedRef    = useRef(onStrokeFinished);
   const onLayerEventRef        = useRef(onLayerEvent);
   const onConnectionChangeRef  = useRef(onConnectionChange);
 
-  colorRef.current      = color;
-  sizeRef.current       = brushSize;
-  opacityRef.current    = opacity;
-  eraserRef.current     = eraser;
-  brushTypeRef.current  = brushType;
-  panModeRef.current    = panMode;
-  bgColorRef.current    = bgColor;
-  canvasSizeRef.current = canvasSize;
-  layersRef.current     = layers;
-  activeLayerRef.current = activeLayerId;
-  onStrokeAddedRef.current    = onStrokeAdded;
-  onStrokeFinishedRef.current = onStrokeFinished;
-  onLayerEventRef.current        = onLayerEvent;
-  onConnectionChangeRef.current  = onConnectionChange;
+  colorRef.current = color; sizeRef.current = brushSize; opacityRef.current = opacity;
+  eraserRef.current = eraser; brushTypeRef.current = brushType; panModeRef.current = panMode;
+  bgColorRef.current = bgColor; canvasSizeRef.current = canvasSize;
+  layersRef.current = layers; activeLayerRef.current = activeLayerId;
+  onStrokeAddedRef.current = onStrokeAdded; onStrokeFinishedRef.current = onStrokeFinished;
+  onLayerEventRef.current = onLayerEvent; onConnectionChangeRef.current = onConnectionChange;
 
   const MIN_SCALE = 0.05, MAX_SCALE = 10;
-  const GESTURE_MS = 500, GESTURE_PX = 22; // más tolerante para iPad
-  const STREAM_PTS = 3,   STREAM_MS  = 32;
+  // FREEZE_MS: tiempo que esperamos con 1 dedo quieto antes de comprometer el trazo.
+  // Si en ese tiempo llega un 2º/3er dedo, se interpreta como gesto, no como dibujo.
+  const FREEZE_MS = 90;
+  const DRAW_THRESHOLD_PX = 4;   // mover más que esto con 1 dedo = confirmar dibujo al instante
+  const GESTURE_MS  = 500;       // ventana total para considerar tap de 2/3 dedos
+  const GESTURE_PX  = 22;        // movimiento máximo tolerado para que cuente como tap
+  const STREAM_PTS = 3, STREAM_MS = 32;
 
   const toWorld = (sx:number, sy:number) => {
     const v = viewRef.current;
@@ -222,25 +193,17 @@ export default function Canvas({
     return layerCtxRef.current.get(layerId)!;
   };
 
-  // ── drawStrokeFrom ───────────────────────────────────────────────────────
   const drawStrokeFrom = (ctx: CanvasRenderingContext2D, stroke: Stroke, fromIndex: number) => {
-    const pts = stroke.points;
-    if (pts.length < 1) return;
-    const bt = stroke.brushType ?? "pen";
-    const col = stroke.color;
-    const sz  = stroke.size;
-    const { r,g,b } = hexRgb(col);
-    const erasing = stroke.eraser;
-    const start   = Math.max(fromIndex === 0 ? 0 : fromIndex-1, 0);
-
+    const pts = stroke.points; if (pts.length < 1) return;
+    const bt = stroke.brushType ?? "pen", col = stroke.color, sz = stroke.size;
+    const { r,g,b } = hexRgb(col); const erasing = stroke.eraser;
+    const start = Math.max(fromIndex === 0 ? 0 : fromIndex-1, 0);
     ctx.save();
     ctx.globalCompositeOperation = erasing ? "destination-out" : "source-over";
     if (erasing) ctx.globalAlpha = 1;
-
     if (bt === "pen") {
       if (pts.length < 2) { ctx.restore(); return; }
-      ctx.globalAlpha = stroke.opacity;
-      ctx.lineCap = "round"; ctx.lineJoin = "round";
+      ctx.globalAlpha = stroke.opacity; ctx.lineCap = "round"; ctx.lineJoin = "round";
       ctx.lineWidth = sz; ctx.strokeStyle = erasing ? "#000" : col;
       ctx.beginPath(); ctx.moveTo(pts[start].x, pts[start].y);
       for (let i=start+1;i<pts.length;i++) ctx.lineTo(pts[i].x,pts[i].y);
@@ -252,22 +215,19 @@ export default function Canvas({
       const w=sz,h=Math.max(1,sz*0.18);
       const dim=Math.ceil(Math.sqrt(w*w+h*h))+4, half=dim/2;
       const stamp=getCachedStamp(`${bt}|${sz}|${col}|${erasing}`,dim,(sc)=>{
-        sc.fillStyle=erasing?"#000":col;
-        sc.translate(half,half);sc.rotate(angle);sc.fillRect(-w/2,-h/2,w,h);
+        sc.fillStyle=erasing?"#000":col; sc.translate(half,half); sc.rotate(angle); sc.fillRect(-w/2,-h/2,w,h);
       });
       for(let i=Math.max(start,1);i<pts.length;i++){
         const a=pts[i-1],bPt=pts[i];
         ctx.drawImage(stamp,(a.x+bPt.x)/2-half,(a.y+bPt.y)/2-half);
       }
     } else if (bt==="airbrush") {
-      const density=Math.max(8,Math.floor(sz*2));
-      const radius=sz*1.8;
+      const density=Math.max(8,Math.floor(sz*2)); const radius=sz*1.8;
       const dim=Math.ceil(radius*2)+4, half=dim/2;
       const stamp=getCachedStamp(`airbrush|${sz}|${r},${g},${b}|${stroke.opacity}|${erasing}`,dim,(sc)=>{
         sc.fillStyle=erasing?`rgba(0,0,0,${stroke.opacity*0.22})`:`rgba(${r},${g},${b},${stroke.opacity*0.22})`;
         for(let i=0;i<density;i++){
-          const ang=prng(i*6271)*Math.PI*2;
-          const rad=Math.sqrt(prng(i*7919))*radius;
+          const ang=prng(i*6271)*Math.PI*2, rad=Math.sqrt(prng(i*7919))*radius;
           sc.beginPath();sc.arc(half+Math.cos(ang)*rad,half+Math.sin(ang)*rad,0.7,0,Math.PI*2);sc.fill();
         }
       });
@@ -302,8 +262,7 @@ export default function Canvas({
       const grain=Math.max(3,Math.floor(sz*0.5));
       ctx.lineCap="round";ctx.lineJoin="round";
       for(let g2=0;g2<grain;g2++){
-        const offX=(prng(g2*4001)-0.5)*sz*0.85;
-        const offY=(prng(g2*5003)-0.5)*sz*0.85;
+        const offX=(prng(g2*4001)-0.5)*sz*0.85, offY=(prng(g2*5003)-0.5)*sz*0.85;
         ctx.globalAlpha=(0.12+prng(g2*7001)*0.3)*stroke.opacity;
         ctx.strokeStyle=erasing?"#000":col;
         ctx.lineWidth=Math.max(0.4,sz*0.08+prng(g2*3007)*sz*0.07);
@@ -327,8 +286,7 @@ export default function Canvas({
       const lines=Math.max(2,Math.floor(sz*0.4));
       ctx.lineCap="round";
       for(let l=0;l<lines;l++){
-        const offX=(prng(l*2017)-0.5)*sz*0.65;
-        const offY=(prng(l*3019)-0.5)*sz*0.65;
+        const offX=(prng(l*2017)-0.5)*sz*0.65, offY=(prng(l*3019)-0.5)*sz*0.65;
         ctx.globalAlpha=(0.07+prng(l*9001)*0.15)*stroke.opacity;
         ctx.strokeStyle=erasing?"#000":col;
         ctx.lineWidth=0.4+prng(l*4001)*0.5;
@@ -339,7 +297,6 @@ export default function Canvas({
     }
     ctx.restore();
   };
-
   const drawStroke = (ctx: CanvasRenderingContext2D, stroke: Stroke) => drawStrokeFrom(ctx, stroke, 0);
 
   const rebuildLayerCanvas = (layerId: number) => {
@@ -350,34 +307,21 @@ export default function Canvas({
     strokesRef.current.filter(s => (s.layerId ?? -1) === layerId).forEach(s => drawStroke(ctx,s));
     dirtyLayersRef.current.delete(layerId);
   };
-
   const rebuildAllLayers = () => {
     const ids = new Set(layersRef.current.map(l => l.id));
     ids.forEach(id => rebuildLayerCanvas(id));
     dirtyLayersRef.current.clear();
   };
 
-  // ── composite ────────────────────────────────────────────────────────────
   const compositeNow = () => {
     const canvas = canvasRef.current; if (!canvas) return;
-    const ctx    = canvas.getContext("2d")!;
-    const dpr    = window.devicePixelRatio || 1;
-    const v      = viewRef.current;
-
-    ctx.setTransform(1,0,0,1,0,0);
-    ctx.fillStyle = "#1a1a1a";
-    ctx.fillRect(0,0,canvas.width,canvas.height);
-
-    ctx.save();
-    ctx.scale(dpr,dpr);
-    ctx.translate(v.x,v.y);
-    ctx.scale(v.scale,v.scale);
-
+    const ctx = canvas.getContext("2d")!;
+    const dpr = window.devicePixelRatio || 1, v = viewRef.current;
+    ctx.setTransform(1,0,0,1,0,0); ctx.fillStyle = "#1a1a1a"; ctx.fillRect(0,0,canvas.width,canvas.height);
+    ctx.save(); ctx.scale(dpr,dpr); ctx.translate(v.x,v.y); ctx.scale(v.scale,v.scale);
     const cs = canvasSizeRef.current;
-
     const drawContent = (c: CanvasRenderingContext2D) => {
-      c.fillStyle = bgColorRef.current;
-      c.fillRect(0,0, offW(), offH());
+      c.fillStyle = bgColorRef.current; c.fillRect(0,0, offW(), offH());
       for (const img of imagesRef.current) {
         const el = getCachedImage(img);
         if (el) c.drawImage(el, img.x, img.y, img.w, img.h);
@@ -385,30 +329,20 @@ export default function Canvas({
       for (const layer of layersRef.current) {
         const isHidden = layer.visible === false || localHiddenRef.current.has(layer.id);
         if (isHidden) continue;
-        // Flush dirty antes de compositar
         if (dirtyLayersRef.current.has(layer.id)) rebuildLayerCanvas(layer.id);
         const lc = layerOffscrRef.current.get(layer.id);
         if (!lc) continue;
-        c.save();
-        c.globalAlpha = layer.opacity;
-        c.globalCompositeOperation = getBlendCSS(layer.blendMode);
-        c.drawImage(lc, 0,0);
-        c.restore();
+        c.save(); c.globalAlpha = layer.opacity; c.globalCompositeOperation = getBlendCSS(layer.blendMode);
+        c.drawImage(lc, 0,0); c.restore();
       }
     };
-
     if (cs) {
       ctx.shadowColor = "rgba(0,0,0,0.5)"; ctx.shadowBlur = 20/v.scale;
-      ctx.fillStyle = bgColorRef.current; ctx.fillRect(0,0,cs.w,cs.h);
-      ctx.shadowBlur = 0;
+      ctx.fillStyle = bgColorRef.current; ctx.fillRect(0,0,cs.w,cs.h); ctx.shadowBlur = 0;
       ctx.save(); ctx.beginPath(); ctx.rect(0,0,cs.w,cs.h); ctx.clip();
       drawContent(ctx); ctx.restore();
-      ctx.strokeStyle = "rgba(255,255,255,0.12)"; ctx.lineWidth = 1/v.scale;
-      ctx.strokeRect(0,0,cs.w,cs.h);
-    } else {
-      drawContent(ctx);
-    }
-
+      ctx.strokeStyle = "rgba(255,255,255,0.12)"; ctx.lineWidth = 1/v.scale; ctx.strokeRect(0,0,cs.w,cs.h);
+    } else { drawContent(ctx); }
     if (currentStrokeRef.current) drawStroke(ctx, currentStrokeRef.current);
     remotePreviewsRef.current.forEach(s => { if(s.points.length>1) drawStroke(ctx,s); });
     cursorsRef.current.forEach(cursor => {
@@ -420,33 +354,26 @@ export default function Canvas({
     ctx.restore();
     rafRef.current = null;
   };
-
   const requestFrame = () => { if(rafRef.current!==null)return; rafRef.current=requestAnimationFrame(compositeNow); };
-  const redraw       = () => requestFrame();
-  const redrawFull   = () => { rebuildAllLayers(); requestFrame(); };
+  const redraw = () => requestFrame();
+  const redrawFull = () => { rebuildAllLayers(); requestFrame(); };
 
-  // FIX: bgColor solo necesita requestFrame (se dibuja en composite, no en offscreen)
   useEffect(() => { requestFrame(); }, [bgColor, layers]);
 
-  // Al cambiar canvasSize: redimensionar todos los offscreens y reconstruir
   useEffect(() => {
     if (!canvasSize) return;
-    // Redimensionar offscreens existentes al nuevo tamaño
     layerOffscrRef.current.forEach((lc, id) => {
-      // Guardar contenido actual
       const tmp = document.createElement("canvas");
       tmp.width = lc.width; tmp.height = lc.height;
       tmp.getContext("2d")!.drawImage(lc, 0, 0);
-      // Redimensionar
-      lc.width  = canvasSize.w;
-      lc.height = canvasSize.h;
-      // Restaurar contenido escalado
+      lc.width = canvasSize.w; lc.height = canvasSize.h;
       lc.getContext("2d")!.drawImage(tmp, 0, 0, tmp.width, tmp.height, 0, 0, canvasSize.w, canvasSize.h);
       layerCtxRef.current.set(id, lc.getContext("2d")!);
     });
     rebuildAllLayers();
     requestFrame();
   }, [canvasSize]);
+
   useEffect(() => {
     const cs = canvasSize; if(!cs) return;
     const canvas = canvasRef.current; if(!canvas) return;
@@ -459,74 +386,56 @@ export default function Canvas({
   useEffect(() => {
     const canvas = canvasRef.current; if(!canvas) return;
     const dpr = window.devicePixelRatio||1;
-    // CSS size: descontar toolbar izq (52px) + panel capas der (200px)
     const cssW = window.innerWidth - 52 - 200;
     const cssH = window.innerHeight - 52;
     canvas.style.width  = cssW + "px";
     canvas.style.height = cssH + "px";
-    // Píxeles físicos = CSS * DPR
     canvas.width  = Math.round(cssW * dpr);
     canvas.height = Math.round(cssH * dpr);
 
-    const room     = new URLSearchParams(window.location.search).get("room")||"default";
+    const room = new URLSearchParams(window.location.search).get("room")||"default";
     const protocol = window.location.protocol==="https:"?"wss:":"ws:";
-    const wsUrl    = (import.meta as any).env?.VITE_WS_URL||`${protocol}//${window.location.host}`;
+    const wsUrl = (import.meta as any).env?.VITE_WS_URL||`${protocol}//${window.location.host}`;
 
-    // ── Auto-reconnect WS ──────────────────────────────────────────────────
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let reconnectDelay = 1000;
     let intentionalClose = false;
-
     let pingInterval: ReturnType<typeof setInterval> | null = null;
+    const usernameRef = { current: username };
 
     const connectWS = () => {
       if (intentionalClose) return;
       onConnectionChangeRef.current?.("reconnecting");
       const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
-
       ws.onopen = () => {
         reconnectDelay = 1000;
         onConnectionChangeRef.current?.("connected");
         ws.send(JSON.stringify({type:"join", room, username: usernameRef.current}));
-        // Ping cada 20s para mantener viva la conexión en Render free tier
         if (pingInterval) clearInterval(pingInterval);
         pingInterval = setInterval(() => {
-          if (ws.readyState === WebSocket.OPEN)
-            ws.send(JSON.stringify({type:"ping"}));
+          if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({type:"ping"}));
         }, 20000);
       };
-
       ws.onclose = () => {
         if (intentionalClose) return;
         if (pingInterval) { clearInterval(pingInterval); pingInterval = null; }
         onConnectionChangeRef.current?.("disconnected");
-        reconnectTimer = setTimeout(() => {
-          reconnectDelay = Math.min(reconnectDelay * 1.5, 10000);
-          connectWS();
-        }, reconnectDelay);
+        reconnectTimer = setTimeout(() => { reconnectDelay = Math.min(reconnectDelay*1.5,10000); connectWS(); }, reconnectDelay);
       };
-
       ws.onerror = () => ws.close();
       ws.onmessage = handleMessage;
     };
 
-    // Ref para username actualizable sin reconectar
-    const usernameRef = { current: username };
-
     const handleMessage = (event: MessageEvent) => {
       const data = JSON.parse(event.data);
-
       if (data.type==="init") {
-        strokesRef.current = data.strokes||[];
+        // FIX: asegurar que cada stroke recibido tenga _sid (puede venir sin él de la DB)
+        strokesRef.current = (data.strokes||[]).map((s: Stroke) => s._sid ? s : {...s, _sid: genSid()});
         imagesRef.current  = data.images ||[];
         if (data.bgColor) onBgColor?.(data.bgColor);
         if (data.myUserId) myUserIdRef.current = data.myUserId;
-        onLayerEventRef.current?.({
-          type:"init_layers",
-          layers: data.layers||[],
-          myUserId: data.myUserId,
-        });
+        onLayerEventRef.current?.({ type:"init_layers", layers: data.layers||[], myUserId: data.myUserId });
         const pending=imagesRef.current.filter(img=>!imgCache.has(img.id));
         if(pending.length===0){redrawFull();return;}
         let loaded=0;
@@ -537,72 +446,60 @@ export default function Canvas({
         }
         return;
       }
-      if(data.type==="pong")   { return; } // keepalive
-      if(data.type==="users")  { setUsers?.(data.users||[]); return; }
-      if(data.type==="stroke") {
-        const s=data.stroke as Stroke;
+      if(data.type==="pong") return;
+      if(data.type==="users"){ setUsers?.(data.users||[]); return; }
+      if(data.type==="stroke"){
+        const s={...data.stroke, _sid: data.stroke._sid || genSid()} as Stroke;
         strokesRef.current.push(s);
         remotePreviewsRef.current.delete(data.userId||"");
         drawStroke(getLayerCtx(s.layerId??-1),s);
         requestFrame(); return;
       }
-      if(data.type==="stroke_update") {
-        const uid=data.userId||"unknown";
-        const existing=remotePreviewsRef.current.get(uid);
+      if(data.type==="stroke_update"){
+        const uid=data.userId||"unknown", existing=remotePreviewsRef.current.get(uid);
         if(existing) existing.points.push(...data.points);
         else remotePreviewsRef.current.set(uid,{
           points:[...data.points],color:data.color,size:data.size,
-          opacity:data.opacity,eraser:data.eraser,brushType:data.brushType,
-          layerId:data.layerId,
+          opacity:data.opacity,eraser:data.eraser,brushType:data.brushType,layerId:data.layerId,
         });
         requestFrame(); return;
       }
-      if(data.type==="clear") {
+      if(data.type==="clear"){
         strokesRef.current=[];remotePreviewsRef.current.clear();
         imagesRef.current=[];imgCache.clear();
         layerCtxRef.current.forEach(ctx=>ctx.clearRect(0,0,offW(),offH()));
         requestFrame(); return;
       }
-      if(data.type==="bgcolor") { onBgColor?.(data.color); return; }
-      if(data.type==="reload_strokes") {
-        strokesRef.current=data.strokes||[];
+      if(data.type==="bgcolor"){ onBgColor?.(data.color); return; }
+      if(data.type==="reload_strokes"){
+        strokesRef.current=(data.strokes||[]).map((s: Stroke) => s._sid ? s : {...s, _sid: genSid()});
         redrawFull(); return;
       }
-      // FIX #3: undo remoto — solo reconstruir capas del usuario afectado
-      if(data.type==="undo_sync_remote") {
+      if(data.type==="undo_sync_remote"){
         const uid = data.userId;
-        const mine = (data.strokes || []).map((s: any) => ({...s, _uid: uid}));
-        // Reemplazar strokes de ese usuario en strokesRef
-        strokesRef.current = [
-          ...strokesRef.current.filter((s: any) => s._uid !== uid),
-          ...mine,
-        ];
-        // Solo reconstruir capas afectadas
+        const mine = (data.strokes || []).map((s: any) => ({...s, _uid: uid, _sid: s._sid || genSid()}));
+        strokesRef.current = [...strokesRef.current.filter((s: any) => s._uid !== uid), ...mine];
         const affected: number[] = data.affectedLayers || [];
-        if (affected.length) {
-          affected.forEach((id: number) => rebuildLayerCanvas(id));
-        } else {
-          rebuildAllLayers();
-        }
+        if (affected.length) affected.forEach((id: number) => rebuildLayerCanvas(id));
+        else rebuildAllLayers();
         requestFrame(); return;
       }
-      // Eventos de capas → delegar a App
-      if(data.type==="layer_added")   { onLayerEventRef.current?.(data); getLayerCanvas(data.layer.id); requestFrame(); return; }
-      if(data.type==="layer_update")  { onLayerEventRef.current?.(data); requestFrame(); return; }
-      if(data.type==="layer_deleted") { onLayerEventRef.current?.(data); requestFrame(); return; }
-      if(data.type==="layer_reorder") { onLayerEventRef.current?.(data); requestFrame(); return; }
-      if(data.type==="image_added") {
+      if(data.type==="layer_added"){ onLayerEventRef.current?.(data); getLayerCanvas(data.layer.id); requestFrame(); return; }
+      if(data.type==="layer_update"){ onLayerEventRef.current?.(data); requestFrame(); return; }
+      if(data.type==="layer_deleted"){ onLayerEventRef.current?.(data); requestFrame(); return; }
+      if(data.type==="layer_reorder"){ onLayerEventRef.current?.(data); requestFrame(); return; }
+      if(data.type==="image_added"){
         const img=data.image as CanvasImage;
         imagesRef.current=[...imagesRef.current,img];
         const el=new Image();
         el.onload=()=>{imgCache.set(img.id,el);rebuildAllLayers();requestFrame();};
         el.src=img.data; return;
       }
-      if(data.type==="image_deleted") {
+      if(data.type==="image_deleted"){
         imagesRef.current=imagesRef.current.filter(i=>i.id!==data.id);
         imgCache.delete(data.id); rebuildAllLayers(); requestFrame(); return;
       }
-      if(data.type==="cursor") {
+      if(data.type==="cursor"){
         cursorsRef.current.set(data.userId,{x:data.x,y:data.y,userId:data.username});
         requestFrame();
       }
@@ -618,13 +515,14 @@ export default function Canvas({
     };
 
     const startStroke=(pos:{x:number;y:number})=>{
-      const lid   = activeLayerRef.current;
+      const lid = activeLayerRef.current;
       const layer = layersRef.current.find(l=>l.id===lid);
       if(!layer || layer.locked || !layer.visible) return;
       const world=toWorld(pos.x,pos.y);
       const cs=canvasSizeRef.current;
       if(cs&&(world.x<0||world.y<0||world.x>cs.w||world.y>cs.h))return;
       currentStrokeRef.current={
+        _sid: genSid(),
         points:[world],color:colorRef.current,size:sizeRef.current,
         opacity:opacityRef.current,eraser:eraserRef.current,
         brushType:brushTypeRef.current,layerId:lid,
@@ -648,58 +546,81 @@ export default function Canvas({
 
     const getPos=(e:PointerEvent)=>{
       const rect=canvas.getBoundingClientRect();
-      // En Safari/iPad, getBoundingClientRect puede tener offset por visualViewport
-      // Usamos el rect directamente — clientX/Y ya están en el mismo espacio
-      return {
-        x: e.clientX - rect.left,
-        y: e.clientY - rect.top,
-      };
+      return { x: e.clientX - rect.left, y: e.clientY - rect.top };
     };
 
-    // Fix iPad: recalcular tamaño cuando cambia el visualViewport (zoom del sistema)
     const onViewportResize = () => {
-      const dpr2  = window.devicePixelRatio || 1;
-      const vp    = (window as any).visualViewport;
-      const vpW   = vp ? vp.width  : window.innerWidth;
-      const vpH   = vp ? vp.height : window.innerHeight;
+      const dpr2 = window.devicePixelRatio || 1;
+      const vp = (window as any).visualViewport;
+      const vpW = vp ? vp.width : window.innerWidth;
+      const vpH = vp ? vp.height : window.innerHeight;
       const cssW2 = vpW - 52 - 200;
       const cssH2 = vpH - 52;
-      canvas.style.width  = cssW2 + "px";
+      canvas.style.width = cssW2 + "px";
       canvas.style.height = cssH2 + "px";
-      canvas.width  = Math.round(cssW2 * dpr2);
+      canvas.width = Math.round(cssW2 * dpr2);
       canvas.height = Math.round(cssH2 * dpr2);
       requestFrame();
     };
-    if ((window as any).visualViewport) {
-      (window as any).visualViewport.addEventListener("resize", onViewportResize);
-    }
+    if ((window as any).visualViewport) (window as any).visualViewport.addEventListener("resize", onViewportResize);
+
+    // ── FIX PRINCIPAL: gestos táctiles con commit diferido ──────────────
+    // Estrategia: con 1 dedo, NO empezamos a dibujar de inmediato.
+    // Esperamos FREEZE_MS o un movimiento > DRAW_THRESHOLD_PX.
+    // Si en ese tiempo aparece un 2º/3er dedo, es gesto (pinch/undo/redo), no dibujo.
+    const clearPendingDrawTimer = () => {
+      if (pendingDrawTimerRef.current) { clearTimeout(pendingDrawTimerRef.current); pendingDrawTimerRef.current = null; }
+    };
+
+    const commitDrawIfPending = (pos:{x:number;y:number}) => {
+      const g = gestureRef.current;
+      if (!g || g.drawCommitted) return;
+      if (touchPtrsRef.current.size !== 1) return; // ya hay más dedos, no es dibujo
+      g.drawCommitted = true;
+      clearPendingDrawTimer();
+      startStroke(pos);
+    };
 
     const onPointerDown=(e:PointerEvent)=>{
       canvas.setPointerCapture(e.pointerId);
       const pos=getPos(e);
+
       if(e.pointerType==="pen"||e.pointerType==="mouse"){
         if(panModeRef.current){panStartRef.current={x:pos.x,y:pos.y,vx:viewRef.current.x,vy:viewRef.current.y};return;}
         startStroke(pos);return;
       }
+
       touchPtrsRef.current.set(e.pointerId,pos);
       const count=touchPtrsRef.current.size;
 
       if(count===1){
-        // NO iniciar trazo aquí — esperar a onPointerMove para ver si llega un 2º dedo
-        gestureRef.current={time:performance.now(),maxFingers:1,fingerMoves:new Map([[e.pointerId,0]])};
+        clearPendingDrawTimer();
+        gestureRef.current={
+          time:performance.now(), maxFingers:1,
+          fingerMoves:new Map([[e.pointerId,0]]),
+          drawCommitted:false, firstPos:{...pos},
+        };
+        // Programar commit automático tras FREEZE_MS si nadie más toca
+        pendingDrawTimerRef.current = setTimeout(() => {
+          commitDrawIfPending(pos);
+        }, FREEZE_MS);
         return;
       }
-      // 2+ dedos: cancelar trazo activo, registrar gesto
+
+      // 2+ dedos: cancelar cualquier intento de dibujo pendiente
+      clearPendingDrawTimer();
       currentStrokeRef.current=null;
       if(gestureRef.current){
         gestureRef.current.maxFingers=Math.max(gestureRef.current.maxFingers,count);
         gestureRef.current.fingerMoves.set(e.pointerId,0);
+        gestureRef.current.drawCommitted = false; // ya no es dibujo, es gesto multi-dedo
       }
       if(count===2){const info=getPinchInfo();lastPinchDist=info.dist;lastPinchMid=info.mid;}
     };
 
     const onPointerMove=(e:PointerEvent)=>{
       const pos=getPos(e);
+
       if(e.pointerType==="pen"||e.pointerType==="mouse"){
         if(panModeRef.current&&panStartRef.current){
           viewRef.current={...viewRef.current,x:panStartRef.current.vx+(pos.x-panStartRef.current.x),y:panStartRef.current.vy+(pos.y-panStartRef.current.y)};
@@ -707,13 +628,12 @@ export default function Canvas({
         }
         if(!currentStrokeRef.current)return;
         const world=toWorld(pos.x,pos.y);
-        if(wsRef.current?.readyState===WebSocket.OPEN)
-          wsRef.current.send(JSON.stringify({type:"cursor",x:world.x,y:world.y}));
+        if(wsRef.current?.readyState===WebSocket.OPEN) wsRef.current.send(JSON.stringify({type:"cursor",x:world.x,y:world.y}));
         currentStrokeRef.current.points.push(world);
         streamStroke();requestFrame();return;
       }
+
       const prev=touchPtrsRef.current.get(e.pointerId);
-      // Acumular distancia POR dedo (no bool global)
       if(prev&&gestureRef.current){
         const dx=pos.x-prev.x,dy=pos.y-prev.y;
         const dist=Math.sqrt(dx*dx+dy*dy);
@@ -721,11 +641,19 @@ export default function Canvas({
         gestureRef.current.fingerMoves.set(e.pointerId,cur+dist);
       }
       touchPtrsRef.current.set(e.pointerId,pos);
-      // Iniciar trazo AQUÍ si sigue siendo 1 dedo (diferido desde pointerdown)
-      if(touchPtrsRef.current.size===1&&!currentStrokeRef.current){
-        startStroke(pos);
+
+      // Si seguimos con 1 solo dedo y se mueve más del umbral, confirmar dibujo YA
+      if(touchPtrsRef.current.size===1 && gestureRef.current && !gestureRef.current.drawCommitted){
+        const g = gestureRef.current;
+        const dx = pos.x - (g.firstPos?.x ?? pos.x);
+        const dy = pos.y - (g.firstPos?.y ?? pos.y);
+        if (Math.sqrt(dx*dx+dy*dy) > DRAW_THRESHOLD_PX) {
+          commitDrawIfPending(pos);
+        }
       }
+
       if(touchPtrsRef.current.size===2){
+        clearPendingDrawTimer();
         const info=getPinchInfo(),v=viewRef.current;
         const sr=info.dist/lastPinchDist;
         const ns=Math.min(MAX_SCALE,Math.max(MIN_SCALE,v.scale*sr));
@@ -736,10 +664,10 @@ export default function Canvas({
         };
         lastPinchDist=info.dist;lastPinchMid=info.mid;redraw();return;
       }
+
       if(!currentStrokeRef.current)return;
       const world=toWorld(pos.x,pos.y);
-      if(wsRef.current?.readyState===WebSocket.OPEN)
-        wsRef.current.send(JSON.stringify({type:"cursor",x:world.x,y:world.y}));
+      if(wsRef.current?.readyState===WebSocket.OPEN) wsRef.current.send(JSON.stringify({type:"cursor",x:world.x,y:world.y}));
       currentStrokeRef.current.points.push(world);
       streamStroke();requestFrame();
     };
@@ -748,24 +676,26 @@ export default function Canvas({
       if(!currentStrokeRef.current)return;
       const stroke=currentStrokeRef.current;
       currentStrokeRef.current=null;
-      // Marcar con _uid para que undo_sync_remote sepa qué strokes son míos
       const markedStroke = {...stroke, _uid: myUserIdRef.current};
       strokesRef.current.push(markedStroke);
       myStrokesRef.current=[...myStrokesRef.current,markedStroke];
       drawStroke(getLayerCtx(stroke.layerId??-1),stroke);
-      if(wsRef.current?.readyState===WebSocket.OPEN)
-        wsRef.current.send(JSON.stringify({type:"stroke",stroke}));
+      if(wsRef.current?.readyState===WebSocket.OPEN) wsRef.current.send(JSON.stringify({type:"stroke",stroke}));
       if(!stroke.eraser)onStrokeFinishedRef.current?.(stroke.color);
+
       const getMyStrokes=()=>myStrokesRef.current;
+      // FIX CLAVE: comparar por _sid (id único) en vez de includes() por referencia
       const setMyStrokes=(newMine:Stroke[])=>{
-        // Marcar mis strokes con _uid para sincronización
         const uid = myUserIdRef.current;
-        const marked = newMine.map(s => ({...s, _uid: uid}));
-        const others=strokesRef.current.filter((s:any)=>s._uid!==uid);
-        myStrokesRef.current=marked;
-        strokesRef.current=[...others,...marked];
+        const marked = newMine.map(s => ({...s, _uid: uid, _sid: s._sid || genSid()}));
+        // "others" = strokes que NO son del usuario actual (sin importar referencia)
+        const others = strokesRef.current.filter((s:any) => s._uid !== uid);
+        myStrokesRef.current = marked;
+        strokesRef.current = [...others, ...marked];
         const myLayerIds = new Set(marked.map((s:any) => s.layerId ?? -1));
         myLayerIds.forEach(id => rebuildLayerCanvas(id));
+        // Reconstruir TODAS mis capas afectadas anteriormente también (seguridad ante undo que vacía una capa)
+        layersRef.current.forEach(l => { if (l.ownerId === uid) rebuildLayerCanvas(l.id); });
         requestFrame();
         if(wsRef.current?.readyState===WebSocket.OPEN)
           wsRef.current.send(JSON.stringify({type:"undo_sync",strokes:marked}));
@@ -780,27 +710,46 @@ export default function Canvas({
         if(currentStrokeRef.current)finishStroke();
         return;
       }
+
       touchPtrsRef.current.delete(e.pointerId);
-      if(touchPtrsRef.current.size===0&&gestureRef.current){
-        const{time,maxFingers,fingerMoves}=gestureRef.current;
-        const elapsed=performance.now()-time;
-        gestureRef.current=null;
-        // Gesto válido: tiempo < GESTURE_MS Y ningún dedo se movió más de GESTURE_PX
-        const maxMove=Math.max(0,...Array.from(fingerMoves.values()));
-        if(elapsed<GESTURE_MS&&maxMove<GESTURE_PX){
-          if(maxFingers===2){window.dispatchEvent(new CustomEvent("drawbot:undo"));return;}
-          if(maxFingers===3){window.dispatchEvent(new CustomEvent("drawbot:redo"));return;}
+
+      if(touchPtrsRef.current.size===0){
+        clearPendingDrawTimer();
+        if(gestureRef.current){
+          const{time,maxFingers,fingerMoves,drawCommitted}=gestureRef.current;
+          const elapsed=performance.now()-time;
+          gestureRef.current=null;
+
+          // Si ya confirmamos que era dibujo, no evaluar gesto — solo terminar el trazo
+          if (drawCommitted) {
+            if(currentStrokeRef.current) finishStroke();
+            return;
+          }
+
+          const maxMove=Math.max(0,...Array.from(fingerMoves.values()));
+          if(elapsed<GESTURE_MS && maxMove<GESTURE_PX){
+            if(maxFingers===2){ window.dispatchEvent(new CustomEvent("drawbot:undo")); return; }
+            if(maxFingers===3){ window.dispatchEvent(new CustomEvent("drawbot:redo")); return; }
+          }
         }
       }
+
       if(currentStrokeRef.current&&touchPtrsRef.current.size===0)finishStroke();
+    };
+
+    const onPointerCancel=(e:PointerEvent)=>{
+      touchPtrsRef.current.delete(e.pointerId);
+      if(touchPtrsRef.current.size===0){
+        clearPendingDrawTimer();
+        currentStrokeRef.current=null;
+        gestureRef.current=null;
+      }
     };
 
     const onWheel=(e:WheelEvent)=>{
       e.preventDefault();
       const rect=canvas.getBoundingClientRect();
-      const mx=e.clientX-rect.left;
-      const my=e.clientY-rect.top;
-      const v=viewRef.current;
+      const mx=e.clientX-rect.left, my=e.clientY-rect.top, v=viewRef.current;
       const delta=e.deltaY<0?1.12:0.9;
       const ns=Math.min(MAX_SCALE,Math.max(MIN_SCALE,v.scale*delta));
       viewRef.current={x:mx-(mx-v.x)*(ns/v.scale),y:my-(my-v.y)*(ns/v.scale),scale:ns};
@@ -810,13 +759,6 @@ export default function Canvas({
     canvas.addEventListener("pointerdown",  onPointerDown);
     canvas.addEventListener("pointermove",  onPointerMove);
     canvas.addEventListener("pointerup",    onPointerUp);
-    const onPointerCancel=(e:PointerEvent)=>{
-      touchPtrsRef.current.delete(e.pointerId);
-      if(touchPtrsRef.current.size===0){
-        currentStrokeRef.current=null;
-        gestureRef.current=null;
-      }
-    };
     canvas.addEventListener("pointercancel",onPointerCancel);
     canvas.addEventListener("wheel",        onWheel,{passive:false});
 
@@ -825,8 +767,7 @@ export default function Canvas({
       const ec=document.createElement("canvas");
       ec.width=cs?cs.w:DEFAULT_W; ec.height=cs?cs.h:DEFAULT_H;
       const ectx=ec.getContext("2d")!;
-      ectx.fillStyle=bgColorRef.current;
-      ectx.fillRect(0,0,ec.width,ec.height);
+      ectx.fillStyle=bgColorRef.current; ectx.fillRect(0,0,ec.width,ec.height);
       for(const img of imagesRef.current){
         const el=getCachedImage(img);
         if(el)ectx.drawImage(el,img.x,img.y,img.w,img.h);
@@ -834,9 +775,7 @@ export default function Canvas({
       layersRef.current.forEach(layer=>{
         if(!layer.visible)return;
         const lc=layerOffscrRef.current.get(layer.id);if(!lc)return;
-        ectx.save();ectx.globalAlpha=layer.opacity;
-        ectx.drawImage(lc,0,0); // offscreen ya tiene el tamaño correcto
-        ectx.restore();
+        ectx.save();ectx.globalAlpha=layer.opacity;ectx.drawImage(lc,0,0);ectx.restore();
       });
       const link=document.createElement("a");
       link.download=`peonypaint-${Date.now()}.png`;
@@ -868,14 +807,13 @@ export default function Canvas({
 
     onReady?.(savePNG,uploadImage);
 
-    // Actualizar tamaño en resize
     const onResize = () => {
       const dpr2 = window.devicePixelRatio || 1;
       const cssW2 = window.innerWidth - 52 - 200;
       const cssH2 = window.innerHeight - 52;
-      canvas.style.width  = cssW2 + "px";
+      canvas.style.width = cssW2 + "px";
       canvas.style.height = cssH2 + "px";
-      canvas.width  = Math.round(cssW2 * dpr2);
+      canvas.width = Math.round(cssW2 * dpr2);
       canvas.height = Math.round(cssH2 * dpr2);
       requestFrame();
     };
@@ -883,15 +821,14 @@ export default function Canvas({
 
     return ()=>{
       if(rafRef.current)cancelAnimationFrame(rafRef.current);
+      clearPendingDrawTimer();
       canvas.removeEventListener("pointerdown",  onPointerDown);
       canvas.removeEventListener("pointermove",  onPointerMove);
       canvas.removeEventListener("pointerup",    onPointerUp);
       canvas.removeEventListener("pointercancel",onPointerCancel);
       canvas.removeEventListener("wheel",        onWheel);
       window.removeEventListener("resize", onResize);
-      if ((window as any).visualViewport) {
-        (window as any).visualViewport.removeEventListener("resize", onViewportResize);
-      }
+      if ((window as any).visualViewport) (window as any).visualViewport.removeEventListener("resize", onViewportResize);
       intentionalClose = true;
       if (reconnectTimer) clearTimeout(reconnectTimer);
       if (pingInterval) clearInterval(pingInterval);
@@ -899,75 +836,47 @@ export default function Canvas({
     };
   },[]);
 
-  // Exponer helpers al padre via estáticos
-  // Merge de dos capas propias (destructivo pero con undo via onStrokeAdded)
   (Canvas as any)._mergeLayers = (bottomId: number, topId: number) => {
     const bottomLc = layerOffscrRef.current.get(bottomId);
-    const topLc    = layerOffscrRef.current.get(topId);
+    const topLc = layerOffscrRef.current.get(topId);
     if (!bottomLc || !topLc) return;
-
-    // Obtener blend mode de la capa superior
-    const topLayer  = layersRef.current.find(l => l.id === topId);
+    const topLayer = layersRef.current.find(l => l.id === topId);
     const blendMode = getBlendCSS(topLayer?.blendMode);
     const topOpacity = topLayer?.opacity ?? 1;
-
-    // Crear canvas temporal con el resultado fusionado
     const merged = document.createElement("canvas");
     merged.width = offW(); merged.height = offH();
     const mCtx = merged.getContext("2d")!;
-    // 1. Dibujar capa inferior
     mCtx.drawImage(bottomLc, 0, 0);
-    // 2. Aplicar blend mode de la superior sobre la inferior
-    mCtx.save();
-    mCtx.globalCompositeOperation = blendMode;
-    mCtx.globalAlpha = topOpacity;
-    mCtx.drawImage(topLc, 0, 0);
-    mCtx.restore();
-
-    // Reemplazar offscreen de la capa inferior con el resultado
+    mCtx.save(); mCtx.globalCompositeOperation = blendMode; mCtx.globalAlpha = topOpacity;
+    mCtx.drawImage(topLc, 0, 0); mCtx.restore();
     const bottomCtx = getLayerCtx(bottomId);
     bottomCtx.clearRect(0, 0, offW(), offH());
     bottomCtx.drawImage(merged, 0, 0);
-
-    // Limpiar offscreen de la capa superior
     getLayerCtx(topId).clearRect(0, 0, offW(), offH());
-
     requestFrame();
   };
-
-  // Actualiza la opacidad en layersRef DIRECTO sin pasar por React
-  // Así compositeNow ve el valor actualizado en el mismo frame → slider 60fps
   (Canvas as any)._setLayerOpacityLive = (layerId: number, opacity: number) => {
     const layer = layersRef.current.find(l => l.id === layerId);
     if (layer) layer.opacity = opacity;
     requestFrame();
   };
-
   (Canvas as any)._rename = (name: string) => {
-    if (wsRef.current?.readyState === WebSocket.OPEN)
-      wsRef.current.send(JSON.stringify({type:"rename", username: name}));
+    if (wsRef.current?.readyState === WebSocket.OPEN) wsRef.current.send(JSON.stringify({type:"rename", username: name}));
   };
-
   (Canvas as any)._sendBgColor = (color:string) => {
-    if(wsRef.current?.readyState===WebSocket.OPEN)
-      wsRef.current.send(JSON.stringify({type:"bgcolor",color}));
+    if(wsRef.current?.readyState===WebSocket.OPEN) wsRef.current.send(JSON.stringify({type:"bgcolor",color}));
   };
   (Canvas as any)._sendWS = (msg: object) => {
-    if(wsRef.current?.readyState===WebSocket.OPEN)
-      wsRef.current.send(JSON.stringify(msg));
+    if(wsRef.current?.readyState===WebSocket.OPEN) wsRef.current.send(JSON.stringify(msg));
   };
 
   return (
     <canvas
       ref={canvasRef}
       style={{
-        position:"fixed", top:52, left:52,
-        // El tamaño real lo setea el JS (resize-aware, DPR-aware)
-        // No usamos CSS calc() para evitar desfases con canvas.width
-        display:"block",
+        position:"fixed", top:52, left:52, display:"block",
         cursor:panMode?"grab":"crosshair",
-        touchAction:"none",
-        WebkitUserSelect:"none", userSelect:"none",
+        touchAction:"none", WebkitUserSelect:"none", userSelect:"none",
         // @ts-ignore
         WebkitTouchCallout:"none",
       }}
