@@ -491,11 +491,22 @@ export default function Canvas({
         strokesRef.current = data.strokes||[];
         imagesRef.current  = data.images ||[];
         if (data.bgColor) onBgColor?.(data.bgColor);
+
+        // FIX REFRESH: crear los offscreen canvases de todas las capas AHORA,
+        // de forma síncrona, antes de llamar redrawFull().
+        // onLayerEventRef llama setLayers() en React que es asíncrono —
+        // si redrawFull() corre antes de que React procese el setState,
+        // layerOffscrRef está vacío y el lienzo queda en blanco.
+        const initLayers: Layer[] = data.layers || [];
+        initLayers.forEach(l => getLayerCanvas(l.id));
+
+        // Ahora sí notificar a React (para UI de capas, activeLayerId, etc.)
         onLayerEventRef.current?.({
           type:"init_layers",
-          layers: data.layers||[],
+          layers: initLayers,
           myUserId: data.myUserId,
         });
+
         const pending=imagesRef.current.filter(img=>!imgCache.has(img.id));
         if(pending.length===0){redrawFull();return;}
         let loaded=0;
@@ -651,34 +662,31 @@ export default function Canvas({
       const count = touchPtrsRef.current.size;
 
       if (count === 1) {
-        // Primer dedo: iniciar gesto fresco
+        // Primer dedo: registrar gesto, NO iniciar trazo todavía.
+        // El trazo empieza en onPointerMove solo si sigue siendo 1 dedo.
+        // Así un segundo dedo puede cancelar limpiamente sin dejar strokes colgados.
         gestureRef.current = {
           time: performance.now(),
           maxFingers: 1,
           fingerMoves: new Map([[e.pointerId, 0]]),
         };
-      } else if (gestureRef.current) {
-        // Más dedos se suman al gesto en curso
+        return;
+      }
+
+      // count >= 2: otro dedo llegó — cancelar cualquier trazo en curso
+      currentStrokeRef.current = null;
+
+      if (gestureRef.current) {
         gestureRef.current.maxFingers = Math.max(gestureRef.current.maxFingers, count);
-        // Registrar el nuevo dedo con 0 movimiento acumulado
         gestureRef.current.fingerMoves.set(e.pointerId, 0);
       }
 
       if (count === 2) {
-        // Pinch: cancelar trazo activo
-        currentStrokeRef.current = null;
         const info = getPinchInfo();
         lastPinchDist = info.dist;
         lastPinchMid  = info.mid;
-        return;
       }
-      if (count >= 3) {
-        // Gesto de 3+ dedos: cancelar trazo activo
-        currentStrokeRef.current = null;
-        return;
-      }
-      // count === 1: iniciar trazo
-      startStroke(pos);
+      // count >= 3: gesto redo — registrado en gestureRef, sin más acción
     };
 
     const onPointerMove=(e:PointerEvent)=>{
@@ -709,10 +717,14 @@ export default function Canvas({
       if (prev && gestureRef.current) {
         const dx = pos.x - prev.x, dy = pos.y - prev.y;
         const dist = Math.sqrt(dx*dx + dy*dy);
-        const current = gestureRef.current.fingerMoves.get(e.pointerId) ?? 0;
-        gestureRef.current.fingerMoves.set(e.pointerId, current + dist);
+        const cur = gestureRef.current.fingerMoves.get(e.pointerId) ?? 0;
+        gestureRef.current.fingerMoves.set(e.pointerId, cur + dist);
       }
       touchPtrsRef.current.set(e.pointerId, pos);
+      // Iniciar trazo en el primer move si sigue siendo 1 dedo (diferido desde pointerdown)
+      if (touchPtrsRef.current.size === 1 && !currentStrokeRef.current) {
+        startStroke(pos);
+      }
 
       if (touchPtrsRef.current.size === 2) {
         const info=getPinchInfo(), v=viewRef.current;
@@ -813,10 +825,19 @@ export default function Canvas({
       redraw();
     };
 
+    // pointercancel: limpiar estado sin evaluar gesto (iOS lo dispara en gestos del sistema)
+    const onPointerCancel=(e:PointerEvent)=>{
+      touchPtrsRef.current.delete(e.pointerId);
+      if(touchPtrsRef.current.size===0){
+        currentStrokeRef.current=null;
+        gestureRef.current=null;
+      }
+    };
+
     canvas.addEventListener("pointerdown",  onPointerDown);
     canvas.addEventListener("pointermove",  onPointerMove);
     canvas.addEventListener("pointerup",    onPointerUp);
-    canvas.addEventListener("pointercancel",onPointerUp);
+    canvas.addEventListener("pointercancel",onPointerCancel);
     canvas.addEventListener("wheel",        onWheel,{passive:false});
 
     const savePNG=()=>{
@@ -885,7 +906,7 @@ export default function Canvas({
       canvas.removeEventListener("pointerdown",  onPointerDown);
       canvas.removeEventListener("pointermove",  onPointerMove);
       canvas.removeEventListener("pointerup",    onPointerUp);
-      canvas.removeEventListener("pointercancel",onPointerUp);
+      canvas.removeEventListener("pointercancel",onPointerCancel);
       canvas.removeEventListener("wheel",        onWheel);
       window.removeEventListener("resize", onResize);
       if ((window as any).visualViewport) {

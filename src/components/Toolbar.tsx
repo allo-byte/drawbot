@@ -383,7 +383,6 @@ export default function Toolbar({
         .tb-key-badge.capturing { border-color: #e09a3a; color: #e09a3a; animation: pulse .6s infinite; }
         @keyframes pulse { 0%,100% { opacity:1 } 50% { opacity:.5 } }
 
-        /* Avatar de perfil en toolbar */
         .tb-profile-btn {
           display: flex; align-items: center; gap: 6px;
           cursor: pointer; padding: 3px 6px 3px 3px;
@@ -623,7 +622,8 @@ export default function Toolbar({
           <div className="tb-panel" style={{ zIndex:1100, top:60, right:12, width:280 }}>
             <div className="tb-section" style={{ marginBottom:10 }}>Tamaño del lienzo</div>
             {[
-              { label:"Libre (infinito)", w:0,    h:0    },
+              // ── Sin "Libre (infinito)" — lienzo acotado siempre ──
+              { label:"iPad mini",       w:1024, h:768  },
               { label:"HD",              w:1920, h:1080 },
               { label:"4K",              w:3840, h:2160 },
               { label:"Cuadrado 2K",     w:2048, h:2048 },
@@ -632,16 +632,16 @@ export default function Toolbar({
               { label:"Banner web",      w:1500, h:500  },
               { label:"iPad",            w:2388, h:1668 },
             ].map(p => {
-              const active = p.w===0 ? canvasSize===null : canvasSize?.w===p.w && canvasSize?.h===p.h;
+              const active = canvasSize?.w===p.w && canvasSize?.h===p.h;
               return (
                 <div key={p.label}
-                  onClick={() => { setCanvasSize(p.w===0?null:{w:p.w,h:p.h}); setShowCanvas(false); }}
+                  onClick={() => { setCanvasSize({w:p.w,h:p.h}); setShowCanvas(false); }}
                   style={{ display:"flex", alignItems:"center", justifyContent:"space-between",
                     padding:"8px 10px", borderRadius:8, cursor:"pointer", marginBottom:4,
                     background: active?"#1e1e3a":"#1a1a1a",
                     border:`0.5px solid ${active?"#7070dd":"#2a2a2a"}` }}>
                   <span style={{ color:active?"#aaaaff":"#ccc", fontSize:13 }}>{p.label}</span>
-                  <span style={{ color:"#555", fontSize:12 }}>{p.w===0?"∞":`${p.w}×${p.h}`}</span>
+                  <span style={{ color:"#555", fontSize:12 }}>{`${p.w}×${p.h}`}</span>
                 </div>
               );
             })}
