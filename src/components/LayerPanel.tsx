@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useRef, useCallback } from "react";
 import type { Layer } from "./Canvas";
 
 const BLEND_MODES: { id: string; label: string }[] = [
@@ -35,6 +35,7 @@ type Props = {
   onRename:      (id: number, name: string) => void;
   onReorder:     (fromIdx: number, toIdx: number) => void;
   onOpacity:     (id: number, opacity: number) => void;
+  onOpacityLive: (id: number, opacity: number) => void; // actualiza sin WS ni re-render global
   onMerge:       (topLayerId: number) => void;
   onBlendMode:   (id: number, mode: string) => void;
 };
@@ -57,27 +58,98 @@ function Avatar({ name, size = 18 }: { name: string; size?: number }) {
   );
 }
 
+// Slider de opacidad ultra fluido:
+// - El valor LOCAL se guarda en un ref (sin re-render)
+// - compositeNow lo lee directo via onOpacityLive que actualiza layersRef
+// - Solo al soltar (pointerup) se propaga a React + WS
+function OpacitySlider({ layerId, initialOpacity, onLive, onCommit }: {
+  layerId: number;
+  initialOpacity: number;
+  onLive:   (id: number, v: number) => void;
+  onCommit: (id: number, v: number) => void;
+}) {
+  const valRef  = useRef(Math.round(initialOpacity * 100));
+  const trackRef = useRef<HTMLDivElement>(null);
+  const [display, setDisplay] = useState(Math.round(initialOpacity * 100));
+
+  const calc = useCallback((clientY: number) => {
+    const rect = trackRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const pct  = 1 - Math.max(0, Math.min(1, (clientY - rect.top) / rect.height));
+    const val  = Math.round(pct * 100);
+    if (val === valRef.current) return;
+    valRef.current = val;
+    setDisplay(val);           // solo re-render del slider, no de App
+    onLive(layerId, val / 100); // actualiza layersRef directo → compositeNow ve el valor nuevo
+  }, [layerId, onLive]);
+
+  const handlePointer = useCallback((e: React.PointerEvent) => {
+    e.currentTarget.setPointerCapture(e.pointerId);
+    calc(e.clientY);
+
+    const onMove = (ev: PointerEvent) => calc(ev.clientY);
+    const onUp   = (ev: PointerEvent) => {
+      e.currentTarget.releasePointerCapture(ev.pointerId);
+      e.currentTarget.removeEventListener("pointermove", onMove as any);
+      e.currentTarget.removeEventListener("pointerup",   onUp   as any);
+      onCommit(layerId, valRef.current / 100); // propagar a React + WS al soltar
+    };
+    (e.currentTarget as HTMLDivElement).addEventListener("pointermove", onMove as any);
+    (e.currentTarget as HTMLDivElement).addEventListener("pointerup",   onUp   as any);
+  }, [layerId, calc, onCommit]);
+
+  const pct = display;
+  return (
+    <div style={{padding:"8px 12px 10px", borderTop:"0.5px solid #1a1a1a", flexShrink:0}}>
+      <div style={{
+        fontSize:9, color:"#383838", textTransform:"uppercase", letterSpacing:".06em",
+        marginBottom:5, display:"flex", justifyContent:"space-between",
+      }}>
+        <span>Opacidad</span>
+        <span style={{color:"#555"}}>{display}%</span>
+      </div>
+      <div ref={trackRef}
+        style={{
+          position:"relative", height:3, borderRadius:2,
+          background:"#1e1e1e", cursor:"pointer", touchAction:"none",
+        }}
+        onPointerDown={handlePointer}
+      >
+        <div style={{
+          position:"absolute", left:0, top:0, bottom:0,
+          width:`${pct}%`, borderRadius:2, background:"#7070dd",
+          pointerEvents:"none",
+        }}/>
+        <div style={{
+          position:"absolute", top:"50%", left:`${pct}%`,
+          transform:"translate(-50%,-50%)",
+          width:11, height:11, borderRadius:"50%",
+          background:"#7070dd", border:"1.5px solid #aaaaff",
+          pointerEvents:"none",
+        }}/>
+      </div>
+    </div>
+  );
+}
+
 export default function LayerPanel({
   layers, activeLayerId, myUserId, layerLimit,
   onSelect, onAdd, onDelete,
   onToggleVisibility, onToggleLock,
-  onRename, onReorder, onOpacity, onMerge, onBlendMode,
+  onRename, onReorder, onOpacity, onOpacityLive, onMerge, onBlendMode,
 }: Props) {
-  const [editingId,    setEditingId   ] = useState<number|null>(null);
-  const [nameDraft,    setNameDraft   ] = useState("");
-  const [dragIdx,      setDragIdx     ] = useState<number|null>(null);
-  const [dragOverIdx,  setDragOverIdx ] = useState<number|null>(null);
-  // Visibilidad LOCAL de capas ajenas (no se envía al servidor)
-  const [localHidden,  setLocalHidden ] = useState<Set<number>>(new Set());
+  const [editingId,   setEditingId  ] = useState<number|null>(null);
+  const [nameDraft,   setNameDraft  ] = useState("");
+  const [dragIdx,     setDragIdx    ] = useState<number|null>(null);
+  const [dragOverIdx, setDragOverIdx] = useState<number|null>(null);
+  const [localHidden, setLocalHidden] = useState<Set<number>>(new Set());
 
   const myLayers    = layers.filter(l => l.ownerId === myUserId);
   const otherLayers = layers.filter(l => l.ownerId !== myUserId);
 
-  // Agrupar capas ajenas por dueño
   const byOwner = new Map<string, { ownerName: string; layers: Layer[] }>();
   for (const l of otherLayers) {
-    if (!byOwner.has(l.ownerId))
-      byOwner.set(l.ownerId, { ownerName: l.ownerName, layers: [] });
+    if (!byOwner.has(l.ownerId)) byOwner.set(l.ownerId, { ownerName: l.ownerName, layers: [] });
     byOwner.get(l.ownerId)!.layers.push(l);
   }
 
@@ -89,9 +161,7 @@ export default function LayerPanel({
     });
   };
 
-  const startRename = (l: Layer) => {
-    setEditingId(l.id); setNameDraft(l.name);
-  };
+  const startRename  = (l: Layer) => { setEditingId(l.id); setNameDraft(l.name); };
   const commitRename = (id: number) => {
     const t = nameDraft.trim();
     if (t) onRename(id, t);
@@ -124,45 +194,35 @@ export default function LayerPanel({
           align-items:center; justify-content:center;
           cursor:pointer; transition:all .12s; flex-shrink:0;
         }
-        .lp-add:hover { background:#22224a; border-color:#7070dd; color:#aaaaff; }
+        .lp-add:hover:not(:disabled) { background:#22224a; border-color:#7070dd; color:#aaaaff; }
         .lp-scroll { flex:1; overflow-y:auto; padding:4px 0 8px; }
         .lp-scroll::-webkit-scrollbar { width:3px; }
         .lp-scroll::-webkit-scrollbar-thumb { background:#232323; border-radius:2px; }
-
-        /* Sección */
         .lp-section {
-          padding:8px 12px 4px;
-          font-size:9px; color:#3a3a3a;
+          padding:8px 12px 4px; font-size:9px; color:#3a3a3a;
           text-transform:uppercase; letter-spacing:.08em;
           display:flex; align-items:center; gap:6px;
         }
         .lp-section-line { flex:1; height:0.5px; background:#1e1e1e; }
-
-        /* Item de capa */
         .lp-item {
           display:flex; align-items:center; gap:5px;
           padding:5px 10px 5px 8px;
           cursor:pointer; border-left:2.5px solid transparent;
-          transition:background .1s;
-          position:relative;
+          transition:background .1s; position:relative;
         }
         .lp-item:hover { background:#191919; }
         .lp-item.active { background:#181830; border-left-color:#7070dd; }
         .lp-item.drag-over { background:#1e1e38; }
         .lp-item.readonly { cursor:default; padding-left:20px; }
-
         .lp-handle { font-size:10px; color:#2a2a2a; cursor:grab; padding:0 2px; flex-shrink:0; }
         .lp-handle:hover { color:#444; }
         .lp-handle:active { cursor:grabbing; }
-
         .lp-thumb {
           width:28px; height:28px; border-radius:4px;
           background:#1c1c1c; border:0.5px solid #2a2a2a;
           flex-shrink:0; display:flex; align-items:center;
           justify-content:center; font-size:8px; color:#383838;
-          overflow:hidden;
         }
-
         .lp-info { flex:1; min-width:0; }
         .lp-name {
           font-size:11.5px; color:#bbb;
@@ -174,7 +234,14 @@ export default function LayerPanel({
           border-radius:4px; color:#ccc; font-size:11px;
           padding:2px 4px; outline:none;
         }
-
+        .lp-blend-select {
+          width:100%; margin-top:2px;
+          background:#111; border:0.5px solid #2a2a2a;
+          border-radius:4px; color:#555; font-size:9px;
+          padding:2px 4px; outline:none; cursor:pointer;
+          transition:border-color .12s;
+        }
+        .lp-blend-select:focus { border-color:#7070dd; color:#aaa; }
         .lp-ops { display:flex; gap:1px; align-items:center; flex-shrink:0; }
         .lp-ibtn {
           width:18px; height:18px; border-radius:4px;
@@ -186,48 +253,28 @@ export default function LayerPanel({
         .lp-ibtn:hover { color:#aaa; background:#222; }
         .lp-ibtn.on { color:#7070dd; }
         .lp-ibtn.del:hover { color:#ff5555 !important; background:#1e1010 !important; }
-
-        /* Grupo de otro usuario */
-        .lp-owner {
-          display:flex; align-items:center; gap:6px;
-          padding:7px 12px 3px 12px;
+        .lp-merge-btn {
+          width:18px; height:18px; border-radius:4px;
+          background:transparent; border:none; color:#3a3a3a;
+          font-size:11px; cursor:pointer; padding:0;
+          display:flex; align-items:center; justify-content:center;
+          transition:all .1s;
         }
+        .lp-merge-btn:hover:not(:disabled) { color:#aaaaff; background:#1e1e3a; }
+        .lp-merge-btn:disabled { opacity:0.2; cursor:not-allowed; }
+        .lp-owner { display:flex; align-items:center; gap:6px; padding:7px 12px 3px 12px; }
         .lp-owner-name { font-size:10px; color:#404040; }
-
-        /* Opacidad */
-        .lp-opa-row {
-          padding:8px 12px 10px;
-          border-top:0.5px solid #1a1a1a; flex-shrink:0;
-        }
-        .lp-opa-lbl {
-          font-size:9px; color:#383838; text-transform:uppercase;
-          letter-spacing:.06em; margin-bottom:5px;
-          display:flex; justify-content:space-between;
-        }
-        .lp-opa-lbl span:last-child { color:#555; }
-        input[type=range].lp-slider {
-          -webkit-appearance:none; width:100%; height:3px;
-          border-radius:2px; background:#1e1e1e; outline:none; cursor:pointer;
-        }
-        input[type=range].lp-slider::-webkit-slider-thumb {
-          -webkit-appearance:none; width:11px; height:11px;
-          border-radius:50%; background:#7070dd;
-          border:1.5px solid #aaaaff; cursor:pointer;
-        }
       `}</style>
 
       <div className="lp-wrap">
-        {/* Header */}
         <div className="lp-header">
           <span className="lp-title">Capas</span>
           <div style={{display:"flex",alignItems:"center",gap:5}}>
             <span style={{fontSize:9, color: myLayers.length>=layerLimit?"#e05d5d":"#383838"}}>
               {myLayers.length}/{layerLimit}
             </span>
-            <button
-              className="lp-add"
-              onClick={onAdd}
-              title={myLayers.length>=layerLimit?`Límite de ${layerLimit} capas`:"Nueva capa"}
+            <button className="lp-add" onClick={onAdd}
+              title={myLayers.length>=layerLimit?`Límite ${layerLimit}`:"Nueva capa"}
               disabled={myLayers.length>=layerLimit}
               style={{opacity:myLayers.length>=layerLimit?0.3:1,
                 cursor:myLayers.length>=layerLimit?"not-allowed":"pointer"}}
@@ -236,7 +283,6 @@ export default function LayerPanel({
         </div>
 
         <div className="lp-scroll">
-          {/* ── MIS CAPAS ── */}
           <div className="lp-section">
             <span>Mis capas</span>
             <div className="lp-section-line"/>
@@ -246,8 +292,7 @@ export default function LayerPanel({
             const origIdx = myLayers.length - 1 - rIdx;
             const isActive = layer.id === activeLayerId;
             return (
-              <div
-                key={layer.id}
+              <div key={layer.id}
                 className={`lp-item${isActive?" active":""}${dragOverIdx===origIdx?" drag-over":""}`}
                 onClick={() => onSelect(layer.id)}
                 draggable
@@ -264,9 +309,7 @@ export default function LayerPanel({
                 <div className="lp-thumb">{layer.id}</div>
                 <div className="lp-info">
                   {editingId === layer.id ? (
-                    <input
-                      autoFocus
-                      className="lp-name-input"
+                    <input autoFocus className="lp-name-input"
                       value={nameDraft}
                       onChange={e => setNameDraft(e.target.value)}
                       onBlur={() => commitRename(layer.id)}
@@ -278,46 +321,37 @@ export default function LayerPanel({
                       onClick={e => e.stopPropagation()}
                     />
                   ) : (
-                    <div
-                      className={`lp-name${!layer.visible?" dim":""}`}
+                    <div className={`lp-name${!layer.visible?" dim":""}`}
                       onDoubleClick={e => { e.stopPropagation(); startRename(layer); }}
                       title="Doble clic para renombrar"
                     >{layer.name}</div>
                   )}
                   {isActive && (
-                    <select
-                      className="lp-blend-select"
+                    <select className="lp-blend-select"
                       value={layer.blendMode ?? "normal"}
                       onChange={e => { e.stopPropagation(); onBlendMode(layer.id, e.target.value); }}
                       onClick={e => e.stopPropagation()}
                     >
-                      {BLEND_MODES.map(m => (
-                        <option key={m.id} value={m.id}>{m.label}</option>
-                      ))}
+                      {BLEND_MODES.map(m => <option key={m.id} value={m.id}>{m.label}</option>)}
                     </select>
                   )}
                 </div>
                 <div className="lp-ops" onClick={e => e.stopPropagation()}>
-                  <button
-                    className={`lp-ibtn${layer.visible?" on":""}`}
+                  <button className={`lp-ibtn${layer.visible?" on":""}`}
                     title={layer.visible?"Ocultar":"Mostrar"}
                     onClick={() => onToggleVisibility(layer.id)}
                   >{layer.visible?"👁":"◌"}</button>
-                  <button
-                    className={`lp-ibtn${layer.locked?" on":""}`}
+                  <button className={`lp-ibtn${layer.locked?" on":""}`}
                     title={layer.locked?"Desbloquear":"Bloquear"}
                     onClick={() => onToggleLock(layer.id)}
                   >{layer.locked?"🔒":"🔓"}</button>
-                  <button
-                    className="lp-merge-btn"
-                    title={origIdx===0 ? "No hay capa debajo" : "Fusionar con capa inferior"}
+                  <button className="lp-merge-btn"
+                    title={origIdx===0?"No hay capa debajo":"Fusionar con capa inferior"}
                     disabled={origIdx===0}
                     onClick={() => onMerge(layer.id)}
                   >⤵</button>
                   {myLayers.length > 1 && (
-                    <button
-                      className="lp-ibtn del"
-                      title="Eliminar"
+                    <button className="lp-ibtn del" title="Eliminar"
                       onClick={() => onDelete(layer.id)}
                     >✕</button>
                   )}
@@ -326,7 +360,6 @@ export default function LayerPanel({
             );
           })}
 
-          {/* ── CAPAS DE OTROS USUARIOS ── */}
           {byOwner.size > 0 && (
             <div className="lp-section" style={{marginTop:8}}>
               <span>Sala</span>
@@ -335,7 +368,6 @@ export default function LayerPanel({
           )}
           {Array.from(byOwner.entries()).map(([ownerId, { ownerName, layers: ols }]) => (
             <div key={ownerId}>
-              {/* Cabecera del usuario */}
               <div className="lp-owner">
                 <Avatar name={ownerName}/>
                 <span className="lp-owner-name">{ownerName}</span>
@@ -347,14 +379,11 @@ export default function LayerPanel({
                     <div className="lp-thumb" style={{opacity:.5}}>{layer.id}</div>
                     <div className="lp-info">
                       <div className={`lp-name${hidden?" dim":""}`}
-                        style={{fontSize:11, color: hidden?"#333":"#666"}}>
-                        {layer.name}
-                      </div>
+                        style={{fontSize:11, color: hidden?"#333":"#666"}}
+                      >{layer.name}</div>
                     </div>
                     <div className="lp-ops">
-                      {/* Solo toggle visibilidad LOCAL */}
-                      <button
-                        className={`lp-ibtn${!hidden?" on":""}`}
+                      <button className={`lp-ibtn${!hidden?" on":""}`}
                         title={hidden?"Mostrar localmente":"Ocultar localmente"}
                         onClick={() => toggleLocalHidden(layer.id)}
                         style={{color: hidden?"#333":"#555"}}
@@ -367,20 +396,15 @@ export default function LayerPanel({
           ))}
         </div>
 
-        {/* Opacidad de capa activa */}
+        {/* Opacidad ultra fluida — sin pasar por React en cada tick */}
         {activeLayer && (
-          <div className="lp-opa-row">
-            <div className="lp-opa-lbl">
-              <span>Opacidad</span>
-              <span>{Math.round(activeLayer.opacity*100)}%</span>
-            </div>
-            <input
-              type="range" className="lp-slider"
-              min={0} max={100}
-              value={Math.round(activeLayer.opacity*100)}
-              onChange={e => onOpacity(activeLayer.id, Number(e.target.value)/100)}
-            />
-          </div>
+          <OpacitySlider
+            key={activeLayer.id}
+            layerId={activeLayer.id}
+            initialOpacity={activeLayer.opacity}
+            onLive={onOpacityLive}
+            onCommit={onOpacity}
+          />
         )}
       </div>
     </>

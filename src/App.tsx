@@ -35,12 +35,7 @@ function App() {
   const [brushType,   setBrushType ] = useState<BrushType>("pen");
   const [panMode,     setPanMode   ] = useState(false);
   const [bgColor,     setBgColor   ] = useState("#111111");
-
-  // ── FIX LIENZO: arranca con 1024×768 en vez de lienzo libre (null) ────────
-  // 1024×768 es ligero (~0.8 Mpx vs 8 Mpx del iPad real),
-  // el usuario puede cambiar a cualquier otro tamaño desde el selector de la toolbar
-  const [canvasSize,  setCanvasSize] = useState<CanvasSize>({ w: 1024, h: 768 });
-
+  const [canvasSize,  setCanvasSize] = useState<CanvasSize>(null);
   const [savePNG,     setSavePNG   ] = useState<() => void>(() => () => {});
   const [users,       setUsers     ] = useState<string[]>([]);
   const [profile,     setProfileRaw] = useState<Profile>(getStoredProfile);
@@ -49,6 +44,7 @@ function App() {
   const [layers,      setLayers    ] = useState<Layer[]>([]);
   const [activeLayerId, setActiveLayerId] = useState<number>(-1);
 
+  // FIX #13: myUserId en ref para evitar re-creates de callbacks
   const myUserIdRef = useRef<string>("");
   const [myUserId,  setMyUserId] = useState<string>("");
 
@@ -101,21 +97,26 @@ function App() {
   const handleUndo = useCallback(() => {
     const api = canvasApiRef.current;
     if (!api || !undoStackRef.current.length) return;
-    redoStackRef.current = [...redoStackRef.current, [...api.getMyStrokes()]];
+    redoStackRef.current.push([...api.getMyStrokes()]);
     const snap = undoStackRef.current.pop()!;
-    api.setMyStrokes(snap);
-    setUndoLen(undoStackRef.current.length);
-    setRedoLen(redoStackRef.current.length);
+    api.setMyStrokes(snap); // reconstruye capas y pide frame — síncrono e inmediato
+    // setState solo actualiza los botones — diferir para no bloquear el frame
+    queueMicrotask(() => {
+      setUndoLen(undoStackRef.current.length);
+      setRedoLen(redoStackRef.current.length);
+    });
   }, []);
 
   const handleRedo = useCallback(() => {
     const api = canvasApiRef.current;
     if (!api || !redoStackRef.current.length) return;
-    undoStackRef.current = [...undoStackRef.current, [...api.getMyStrokes()]];
+    undoStackRef.current.push([...api.getMyStrokes()]);
     const snap = redoStackRef.current.pop()!;
     api.setMyStrokes(snap);
-    setUndoLen(undoStackRef.current.length);
-    setRedoLen(redoStackRef.current.length);
+    queueMicrotask(() => {
+      setUndoLen(undoStackRef.current.length);
+      setRedoLen(redoStackRef.current.length);
+    });
   }, []);
 
   const handleUndoRef = useRef(handleUndo);
@@ -152,6 +153,7 @@ function App() {
   }, []);
 
   // ── Layer handlers ───────────────────────────────────────────────────────
+  // FIX #14: useMemo para myLayers
   const myLayers   = useMemo(() => layers.filter(l => l.ownerId === myUserId), [layers, myUserId]);
   const layerLimit = useMemo(() => getLayerLimit(canvasSize), [canvasSize]);
 
@@ -230,6 +232,7 @@ function App() {
     (Canvas as any)._sendWS?.({ type: "layer_update", layers: updated.filter(l => l.ownerId===uid) });
   }, [layers]);
 
+  // FIX #13: handleLayerEvent sin dependencia de myUserId via ref
   const handleLayerEvent = useCallback((event: {
     type: string; layers?: Layer[]; layer?: Layer;
     layerId?: number; myUserId?: string; ownerId?: string; order?: number[];
@@ -268,7 +271,7 @@ function App() {
         return [...others, ...reordered];
       });
     }
-  }, []);
+  }, []); // sin dependencias — usa ref para myUserId
 
   const handleSaveProfile = useCallback((p: Profile) => {
     setProfileRaw(p);
@@ -337,6 +340,7 @@ function App() {
           onRename={handleRenameLayer}
           onReorder={handleReorder}
           onOpacity={handleLayerOpacity}
+          onOpacityLive={(id, op) => { (Canvas as any)._setLayerOpacityLive?.(id, op); }}
           onMerge={handleMergeLayers}
           onBlendMode={handleBlendMode}
         />

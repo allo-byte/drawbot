@@ -30,9 +30,10 @@ export type Layer = {
   locked:    boolean;
   ownerId:   string;
   ownerName: string;
-  blendMode?: BlendMode;
+  blendMode?: BlendMode;  // default = "normal"
 };
 
+// Mapa de BlendMode → GlobalCompositeOperation del canvas
 const BLEND_CSS: Record<string, GlobalCompositeOperation> = {
   "normal":       "source-over",
   "multiply":     "multiply",
@@ -123,8 +124,10 @@ function getCachedImage(img: CanvasImage): HTMLImageElement | null {
   return null;
 }
 
-const WORLD_W = 4096;
-const WORLD_H = 4096;
+// Tamaño de offscreen dinámico — se ajusta al canvasSize
+// No usamos 4096x4096 fijo para ahorrar memoria
+const DEFAULT_W = 2388; // iPad landscape
+const DEFAULT_H = 1668;
 
 export default function Canvas({
   color, brushSize, opacity, eraser, brushType, panMode, username,
@@ -144,6 +147,7 @@ export default function Canvas({
   const currentStrokeRef  = useRef<Stroke | null>(null);
   const rafRef            = useRef<number | null>(null);
   const imagesRef         = useRef<CanvasImage[]>([]);
+  // Visibilidad LOCAL de capas ajenas (no viene del servidor)
   const localHiddenRef    = useRef<Set<number>>(new Set());
 
   const colorRef       = useRef(color);
@@ -161,15 +165,7 @@ export default function Canvas({
   const lastSentMsRef  = useRef(0);
   const viewRef        = useRef({ x:0, y:0, scale:1 });
   const touchPtrsRef   = useRef<Map<number,{x:number;y:number}>>(new Map());
-
-  // ── FIX GESTOS: fingerMoves rastrea distancia acumulada POR dedo ──────────
-  // Antes: `moved: boolean` global → cualquier micro-movimiento cancelaba el gesto
-  // Ahora: Map<pointerId, distanciaAcumulada> → solo cancela si el dedo SE MOVIÓ DE VERDAD
-  const gestureRef     = useRef<{
-    time: number;
-    maxFingers: number;
-    fingerMoves: Map<number, number>; // pointerId → px acumulados
-  } | null>(null);
+  const gestureRef     = useRef<{time:number;maxFingers:number;moved:boolean}|null>(null);
 
   const onStrokeAddedRef    = useRef(onStrokeAdded);
   const onStrokeFinishedRef = useRef(onStrokeFinished);
@@ -192,10 +188,7 @@ export default function Canvas({
   onConnectionChangeRef.current  = onConnectionChange;
 
   const MIN_SCALE = 0.05, MAX_SCALE = 10;
-  // ── FIX: tiempos más tolerantes para móvil ────────────────────────────────
-  // GESTURE_MS 350→500: más tiempo para posicionar dedos
-  // GESTURE_PX 12→20: tolera el micro-movimiento natural al posar dedos en pantalla
-  const GESTURE_MS = 500, GESTURE_PX = 20;
+  const GESTURE_MS = 350, GESTURE_PX = 12;
   const STREAM_PTS = 3,   STREAM_MS  = 32;
 
   const toWorld = (sx:number, sy:number) => {
@@ -203,10 +196,13 @@ export default function Canvas({
     return { x:(sx-v.x)/v.scale, y:(sy-v.y)/v.scale };
   };
 
+  const offW = () => canvasSizeRef.current?.w ?? DEFAULT_W;
+  const offH = () => canvasSizeRef.current?.h ?? DEFAULT_H;
+
   const getLayerCanvas = (layerId: number) => {
     if (!layerOffscrRef.current.has(layerId)) {
       const c = document.createElement("canvas");
-      c.width = WORLD_W; c.height = WORLD_H;
+      c.width = offW(); c.height = offH();
       layerOffscrRef.current.set(layerId, c);
       layerCtxRef.current.set(layerId, c.getContext("2d")!);
     }
@@ -344,7 +340,7 @@ export default function Canvas({
     getLayerCanvas(layerId);
     const ctx = getLayerCtx(layerId);
     ctx.setTransform(1,0,0,1,0,0);
-    ctx.clearRect(0,0,WORLD_W,WORLD_H);
+    ctx.clearRect(0, 0, offW(), offH());
     strokesRef.current.filter(s => (s.layerId ?? -1) === layerId).forEach(s => drawStroke(ctx,s));
     dirtyLayersRef.current.delete(layerId);
   };
@@ -375,7 +371,7 @@ export default function Canvas({
 
     const drawContent = (c: CanvasRenderingContext2D) => {
       c.fillStyle = bgColorRef.current;
-      c.fillRect(0,0, cs?cs.w:WORLD_W, cs?cs.h:WORLD_H);
+      c.fillRect(0,0, offW(), offH());
       for (const img of imagesRef.current) {
         const el = getCachedImage(img);
         if (el) c.drawImage(el, img.x, img.y, img.w, img.h);
@@ -383,6 +379,7 @@ export default function Canvas({
       for (const layer of layersRef.current) {
         const isHidden = layer.visible === false || localHiddenRef.current.has(layer.id);
         if (isHidden) continue;
+        // Flush dirty antes de compositar
         if (dirtyLayersRef.current.has(layer.id)) rebuildLayerCanvas(layer.id);
         const lc = layerOffscrRef.current.get(layer.id);
         if (!lc) continue;
@@ -422,7 +419,28 @@ export default function Canvas({
   const redraw       = () => requestFrame();
   const redrawFull   = () => { rebuildAllLayers(); requestFrame(); };
 
-  useEffect(() => { requestFrame(); }, [bgColor, canvasSize, layers]);
+  // FIX: bgColor solo necesita requestFrame (se dibuja en composite, no en offscreen)
+  useEffect(() => { requestFrame(); }, [bgColor, layers]);
+
+  // Al cambiar canvasSize: redimensionar todos los offscreens y reconstruir
+  useEffect(() => {
+    if (!canvasSize) return;
+    // Redimensionar offscreens existentes al nuevo tamaño
+    layerOffscrRef.current.forEach((lc, id) => {
+      // Guardar contenido actual
+      const tmp = document.createElement("canvas");
+      tmp.width = lc.width; tmp.height = lc.height;
+      tmp.getContext("2d")!.drawImage(lc, 0, 0);
+      // Redimensionar
+      lc.width  = canvasSize.w;
+      lc.height = canvasSize.h;
+      // Restaurar contenido escalado
+      lc.getContext("2d")!.drawImage(tmp, 0, 0, tmp.width, tmp.height, 0, 0, canvasSize.w, canvasSize.h);
+      layerCtxRef.current.set(id, lc.getContext("2d")!);
+    });
+    rebuildAllLayers();
+    requestFrame();
+  }, [canvasSize]);
   useEffect(() => {
     const cs = canvasSize; if(!cs) return;
     const canvas = canvasRef.current; if(!canvas) return;
@@ -435,10 +453,12 @@ export default function Canvas({
   useEffect(() => {
     const canvas = canvasRef.current; if(!canvas) return;
     const dpr = window.devicePixelRatio||1;
+    // CSS size: descontar toolbar izq (52px) + panel capas der (200px)
     const cssW = window.innerWidth - 52 - 200;
     const cssH = window.innerHeight - 52;
     canvas.style.width  = cssW + "px";
     canvas.style.height = cssH + "px";
+    // Píxeles físicos = CSS * DPR
     canvas.width  = Math.round(cssW * dpr);
     canvas.height = Math.round(cssH * dpr);
 
@@ -446,9 +466,11 @@ export default function Canvas({
     const protocol = window.location.protocol==="https:"?"wss:":"ws:";
     const wsUrl    = (import.meta as any).env?.VITE_WS_URL||`${protocol}//${window.location.host}`;
 
+    // ── Auto-reconnect WS ──────────────────────────────────────────────────
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let reconnectDelay = 1000;
     let intentionalClose = false;
+
     let pingInterval: ReturnType<typeof setInterval> | null = null;
 
     const connectWS = () => {
@@ -461,6 +483,7 @@ export default function Canvas({
         reconnectDelay = 1000;
         onConnectionChangeRef.current?.("connected");
         ws.send(JSON.stringify({type:"join", room, username: usernameRef.current}));
+        // Ping cada 20s para mantener viva la conexión en Render free tier
         if (pingInterval) clearInterval(pingInterval);
         pingInterval = setInterval(() => {
           if (ws.readyState === WebSocket.OPEN)
@@ -482,6 +505,7 @@ export default function Canvas({
       ws.onmessage = handleMessage;
     };
 
+    // Ref para username actualizable sin reconectar
     const usernameRef = { current: username };
 
     const handleMessage = (event: MessageEvent) => {
@@ -491,22 +515,11 @@ export default function Canvas({
         strokesRef.current = data.strokes||[];
         imagesRef.current  = data.images ||[];
         if (data.bgColor) onBgColor?.(data.bgColor);
-
-        // FIX REFRESH: crear los offscreen canvases de todas las capas AHORA,
-        // de forma síncrona, antes de llamar redrawFull().
-        // onLayerEventRef llama setLayers() en React que es asíncrono —
-        // si redrawFull() corre antes de que React procese el setState,
-        // layerOffscrRef está vacío y el lienzo queda en blanco.
-        const initLayers: Layer[] = data.layers || [];
-        initLayers.forEach(l => getLayerCanvas(l.id));
-
-        // Ahora sí notificar a React (para UI de capas, activeLayerId, etc.)
         onLayerEventRef.current?.({
           type:"init_layers",
-          layers: initLayers,
+          layers: data.layers||[],
           myUserId: data.myUserId,
         });
-
         const pending=imagesRef.current.filter(img=>!imgCache.has(img.id));
         if(pending.length===0){redrawFull();return;}
         let loaded=0;
@@ -517,7 +530,7 @@ export default function Canvas({
         }
         return;
       }
-      if(data.type==="pong")   { return; }
+      if(data.type==="pong")   { return; } // keepalive
       if(data.type==="users")  { setUsers?.(data.users||[]); return; }
       if(data.type==="stroke") {
         const s=data.stroke as Stroke;
@@ -540,7 +553,7 @@ export default function Canvas({
       if(data.type==="clear") {
         strokesRef.current=[];remotePreviewsRef.current.clear();
         imagesRef.current=[];imgCache.clear();
-        layerCtxRef.current.forEach(ctx=>ctx.clearRect(0,0,WORLD_W,WORLD_H));
+        layerCtxRef.current.forEach(ctx=>ctx.clearRect(0,0,offW(),offH()));
         requestFrame(); return;
       }
       if(data.type==="bgcolor") { onBgColor?.(data.color); return; }
@@ -548,13 +561,16 @@ export default function Canvas({
         strokesRef.current=data.strokes||[];
         redrawFull(); return;
       }
+      // FIX #3: undo remoto — solo reconstruir capas del usuario afectado
       if(data.type==="undo_sync_remote") {
         const uid = data.userId;
         const mine = (data.strokes || []).map((s: any) => ({...s, _uid: uid}));
+        // Reemplazar strokes de ese usuario en strokesRef
         strokesRef.current = [
           ...strokesRef.current.filter((s: any) => s._uid !== uid),
           ...mine,
         ];
+        // Solo reconstruir capas afectadas
         const affected: number[] = data.affectedLayers || [];
         if (affected.length) {
           affected.forEach((id: number) => rebuildLayerCanvas(id));
@@ -563,6 +579,7 @@ export default function Canvas({
         }
         requestFrame(); return;
       }
+      // Eventos de capas → delegar a App
       if(data.type==="layer_added")   { onLayerEventRef.current?.(data); getLayerCanvas(data.layer.id); requestFrame(); return; }
       if(data.type==="layer_update")  { onLayerEventRef.current?.(data); requestFrame(); return; }
       if(data.type==="layer_deleted") { onLayerEventRef.current?.(data); requestFrame(); return; }
@@ -624,9 +641,15 @@ export default function Canvas({
 
     const getPos=(e:PointerEvent)=>{
       const rect=canvas.getBoundingClientRect();
-      return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+      // En Safari/iPad, getBoundingClientRect puede tener offset por visualViewport
+      // Usamos el rect directamente — clientX/Y ya están en el mismo espacio
+      return {
+        x: e.clientX - rect.left,
+        y: e.clientY - rect.top,
+      };
     };
 
+    // Fix iPad: recalcular tamaño cuando cambia el visualViewport (zoom del sistema)
     const onViewportResize = () => {
       const dpr2  = window.devicePixelRatio || 1;
       const vp    = (window as any).visualViewport;
@@ -647,87 +670,41 @@ export default function Canvas({
     const onPointerDown=(e:PointerEvent)=>{
       canvas.setPointerCapture(e.pointerId);
       const pos=getPos(e);
-
       if(e.pointerType==="pen"||e.pointerType==="mouse"){
-        if(panModeRef.current){
-          panStartRef.current={x:pos.x,y:pos.y,vx:viewRef.current.x,vy:viewRef.current.y};
-          return;
-        }
-        startStroke(pos);
-        return;
+        if(panModeRef.current){panStartRef.current={x:pos.x,y:pos.y,vx:viewRef.current.x,vy:viewRef.current.y};return;}
+        startStroke(pos);return;
       }
-
-      // ── Touch ──────────────────────────────────────────────────────────
-      touchPtrsRef.current.set(e.pointerId, pos);
-      const count = touchPtrsRef.current.size;
-
-      if (count === 1) {
-        // Primer dedo: registrar gesto, NO iniciar trazo todavía.
-        // El trazo empieza en onPointerMove solo si sigue siendo 1 dedo.
-        // Así un segundo dedo puede cancelar limpiamente sin dejar strokes colgados.
-        gestureRef.current = {
-          time: performance.now(),
-          maxFingers: 1,
-          fingerMoves: new Map([[e.pointerId, 0]]),
-        };
-        return;
-      }
-
-      // count >= 2: otro dedo llegó — cancelar cualquier trazo en curso
-      currentStrokeRef.current = null;
-
-      if (gestureRef.current) {
-        gestureRef.current.maxFingers = Math.max(gestureRef.current.maxFingers, count);
-        gestureRef.current.fingerMoves.set(e.pointerId, 0);
-      }
-
-      if (count === 2) {
-        const info = getPinchInfo();
-        lastPinchDist = info.dist;
-        lastPinchMid  = info.mid;
-      }
-      // count >= 3: gesto redo — registrado en gestureRef, sin más acción
+      touchPtrsRef.current.set(e.pointerId,pos);
+      const count=touchPtrsRef.current.size;
+      if(count===1)gestureRef.current={time:performance.now(),maxFingers:1,moved:false};
+      else if(gestureRef.current)gestureRef.current.maxFingers=Math.max(gestureRef.current.maxFingers,count);
+      if(count===2){currentStrokeRef.current=null;const info=getPinchInfo();lastPinchDist=info.dist;lastPinchMid=info.mid;return;}
+      if(count===3){currentStrokeRef.current=null;return;}
+      if(count===1)startStroke(pos);
     };
 
     const onPointerMove=(e:PointerEvent)=>{
       const pos=getPos(e);
-
       if(e.pointerType==="pen"||e.pointerType==="mouse"){
         if(panModeRef.current&&panStartRef.current){
-          viewRef.current={
-            ...viewRef.current,
-            x:panStartRef.current.vx+(pos.x-panStartRef.current.x),
-            y:panStartRef.current.vy+(pos.y-panStartRef.current.y),
-          };
-          requestFrame();
-          return;
+          viewRef.current={...viewRef.current,x:panStartRef.current.vx+(pos.x-panStartRef.current.x),y:panStartRef.current.vy+(pos.y-panStartRef.current.y)};
+          requestFrame();return;
         }
-        if(!currentStrokeRef.current) return;
+        if(!currentStrokeRef.current)return;
         const world=toWorld(pos.x,pos.y);
         if(wsRef.current?.readyState===WebSocket.OPEN)
           wsRef.current.send(JSON.stringify({type:"cursor",x:world.x,y:world.y}));
         currentStrokeRef.current.points.push(world);
-        streamStroke();
-        requestFrame();
-        return;
+        streamStroke();requestFrame();return;
       }
-
-      // ── Touch move: acumular distancia POR dedo ─────────────────────────
-      const prev = touchPtrsRef.current.get(e.pointerId);
-      if (prev && gestureRef.current) {
-        const dx = pos.x - prev.x, dy = pos.y - prev.y;
-        const dist = Math.sqrt(dx*dx + dy*dy);
-        const cur = gestureRef.current.fingerMoves.get(e.pointerId) ?? 0;
-        gestureRef.current.fingerMoves.set(e.pointerId, cur + dist);
+      const prev=touchPtrsRef.current.get(e.pointerId);
+      if(prev&&gestureRef.current){
+        const dx=pos.x-prev.x,dy=pos.y-prev.y;
+        if(Math.sqrt(dx*dx+dy*dy)>GESTURE_PX)gestureRef.current.moved=true;
       }
-      touchPtrsRef.current.set(e.pointerId, pos);
-      // Iniciar trazo en el primer move si sigue siendo 1 dedo (diferido desde pointerdown)
-      if (touchPtrsRef.current.size === 1 && !currentStrokeRef.current) {
-        startStroke(pos);
-      }
-
-      if (touchPtrsRef.current.size === 2) {
-        const info=getPinchInfo(), v=viewRef.current;
+      touchPtrsRef.current.set(e.pointerId,pos);
+      if(touchPtrsRef.current.size===2){
+        const info=getPinchInfo(),v=viewRef.current;
         const sr=info.dist/lastPinchDist;
         const ns=Math.min(MAX_SCALE,Math.max(MIN_SCALE,v.scale*sr));
         viewRef.current={
@@ -735,19 +712,14 @@ export default function Canvas({
           y:info.mid.y-(lastPinchMid.y-v.y)*(ns/v.scale)-(lastPinchMid.y-info.mid.y),
           scale:ns,
         };
-        lastPinchDist=info.dist;
-        lastPinchMid=info.mid;
-        redraw();
-        return;
+        lastPinchDist=info.dist;lastPinchMid=info.mid;redraw();return;
       }
-
-      if (!currentStrokeRef.current) return;
+      if(!currentStrokeRef.current)return;
       const world=toWorld(pos.x,pos.y);
       if(wsRef.current?.readyState===WebSocket.OPEN)
         wsRef.current.send(JSON.stringify({type:"cursor",x:world.x,y:world.y}));
       currentStrokeRef.current.points.push(world);
-      streamStroke();
-      requestFrame();
+      streamStroke();requestFrame();
     };
 
     const finishStroke=()=>{
@@ -765,9 +737,11 @@ export default function Canvas({
         const others=strokesRef.current.filter(s=>!myStrokesRef.current.includes(s));
         myStrokesRef.current=newMine;
         strokesRef.current=[...others,...newMine];
+        // Reconstruir solo capas afectadas por mis strokes
         const myLayerIds = new Set(newMine.map(s => s.layerId ?? -1));
         myLayerIds.forEach(id => rebuildLayerCanvas(id));
         requestFrame();
+        // FIX #2: enviar solo mis strokes, no todos los de la sala
         if(wsRef.current?.readyState===WebSocket.OPEN)
           wsRef.current.send(JSON.stringify({type:"undo_sync",strokes:newMine}));
       };
@@ -778,46 +752,27 @@ export default function Canvas({
     const onPointerUp=(e:PointerEvent)=>{
       if(e.pointerType==="pen"||e.pointerType==="mouse"){
         panStartRef.current=null;
-        if(currentStrokeRef.current) finishStroke();
+        if(currentStrokeRef.current)finishStroke();
         return;
       }
-
-      // ── Touch up ────────────────────────────────────────────────────────
       touchPtrsRef.current.delete(e.pointerId);
-
-      if (touchPtrsRef.current.size === 0 && gestureRef.current) {
-        const { time, maxFingers, fingerMoves } = gestureRef.current;
-        gestureRef.current = null;
-        const elapsed = performance.now() - time;
-
-        // ── FIX CLAVE: el gesto es válido si:
-        //   1. Terminó en menos de GESTURE_MS (500ms)
-        //   2. NINGÚN dedo se movió más de GESTURE_PX (20px)
-        //      (antes era un bool global → cualquier micro-movimiento lo rompía)
-        const maxMove = Math.max(...Array.from(fingerMoves.values()));
-        const isTap = elapsed < GESTURE_MS && maxMove < GESTURE_PX;
-
-        if (isTap) {
-          if (maxFingers === 2) {
-            window.dispatchEvent(new CustomEvent("drawbot:undo"));
-            return;
-          }
-          if (maxFingers === 3) {
-            window.dispatchEvent(new CustomEvent("drawbot:redo"));
-            return;
-          }
+      if(touchPtrsRef.current.size===0&&gestureRef.current){
+        const{time,maxFingers,moved}=gestureRef.current;
+        const elapsed=performance.now()-time;
+        gestureRef.current=null;
+        if(!moved&&elapsed<GESTURE_MS){
+          if(maxFingers===2){window.dispatchEvent(new CustomEvent("drawbot:undo"));return;}
+          if(maxFingers===3){window.dispatchEvent(new CustomEvent("drawbot:redo"));return;}
         }
       }
-
-      if (currentStrokeRef.current && touchPtrsRef.current.size === 0) {
-        finishStroke();
-      }
+      if(currentStrokeRef.current&&touchPtrsRef.current.size===0)finishStroke();
     };
 
     const onWheel=(e:WheelEvent)=>{
       e.preventDefault();
       const rect=canvas.getBoundingClientRect();
-      const mx=e.clientX-rect.left, my=e.clientY-rect.top;
+      const mx=e.clientX-rect.left;
+      const my=e.clientY-rect.top;
       const v=viewRef.current;
       const delta=e.deltaY<0?1.12:0.9;
       const ns=Math.min(MAX_SCALE,Math.max(MIN_SCALE,v.scale*delta));
@@ -825,25 +780,16 @@ export default function Canvas({
       redraw();
     };
 
-    // pointercancel: limpiar estado sin evaluar gesto (iOS lo dispara en gestos del sistema)
-    const onPointerCancel=(e:PointerEvent)=>{
-      touchPtrsRef.current.delete(e.pointerId);
-      if(touchPtrsRef.current.size===0){
-        currentStrokeRef.current=null;
-        gestureRef.current=null;
-      }
-    };
-
     canvas.addEventListener("pointerdown",  onPointerDown);
     canvas.addEventListener("pointermove",  onPointerMove);
     canvas.addEventListener("pointerup",    onPointerUp);
-    canvas.addEventListener("pointercancel",onPointerCancel);
+    canvas.addEventListener("pointercancel",onPointerUp);
     canvas.addEventListener("wheel",        onWheel,{passive:false});
 
     const savePNG=()=>{
       const cs=canvasSizeRef.current;
       const ec=document.createElement("canvas");
-      ec.width=cs?cs.w:WORLD_W; ec.height=cs?cs.h:WORLD_H;
+      ec.width=cs?cs.w:DEFAULT_W; ec.height=cs?cs.h:DEFAULT_H;
       const ectx=ec.getContext("2d")!;
       ectx.fillStyle=bgColorRef.current;
       ectx.fillRect(0,0,ec.width,ec.height);
@@ -855,8 +801,7 @@ export default function Canvas({
         if(!layer.visible)return;
         const lc=layerOffscrRef.current.get(layer.id);if(!lc)return;
         ectx.save();ectx.globalAlpha=layer.opacity;
-        if(cs)ectx.drawImage(lc,0,0,cs.w,cs.h,0,0,cs.w,cs.h);
-        else ectx.drawImage(lc,0,0);
+        ectx.drawImage(lc,0,0); // offscreen ya tiene el tamaño correcto
         ectx.restore();
       });
       const link=document.createElement("a");
@@ -889,6 +834,7 @@ export default function Canvas({
 
     onReady?.(savePNG,uploadImage);
 
+    // Actualizar tamaño en resize
     const onResize = () => {
       const dpr2 = window.devicePixelRatio || 1;
       const cssW2 = window.innerWidth - 52 - 200;
@@ -906,7 +852,7 @@ export default function Canvas({
       canvas.removeEventListener("pointerdown",  onPointerDown);
       canvas.removeEventListener("pointermove",  onPointerMove);
       canvas.removeEventListener("pointerup",    onPointerUp);
-      canvas.removeEventListener("pointercancel",onPointerCancel);
+      canvas.removeEventListener("pointercancel",onPointerUp);
       canvas.removeEventListener("wheel",        onWheel);
       window.removeEventListener("resize", onResize);
       if ((window as any).visualViewport) {
@@ -919,26 +865,47 @@ export default function Canvas({
     };
   },[]);
 
+  // Exponer helpers al padre via estáticos
+  // Merge de dos capas propias (destructivo pero con undo via onStrokeAdded)
   (Canvas as any)._mergeLayers = (bottomId: number, topId: number) => {
     const bottomLc = layerOffscrRef.current.get(bottomId);
     const topLc    = layerOffscrRef.current.get(topId);
     if (!bottomLc || !topLc) return;
+
+    // Obtener blend mode de la capa superior
     const topLayer  = layersRef.current.find(l => l.id === topId);
     const blendMode = getBlendCSS(topLayer?.blendMode);
     const topOpacity = topLayer?.opacity ?? 1;
+
+    // Crear canvas temporal con el resultado fusionado
     const merged = document.createElement("canvas");
-    merged.width = WORLD_W; merged.height = WORLD_H;
+    merged.width = offW(); merged.height = offH();
     const mCtx = merged.getContext("2d")!;
+    // 1. Dibujar capa inferior
     mCtx.drawImage(bottomLc, 0, 0);
+    // 2. Aplicar blend mode de la superior sobre la inferior
     mCtx.save();
     mCtx.globalCompositeOperation = blendMode;
     mCtx.globalAlpha = topOpacity;
     mCtx.drawImage(topLc, 0, 0);
     mCtx.restore();
+
+    // Reemplazar offscreen de la capa inferior con el resultado
     const bottomCtx = getLayerCtx(bottomId);
-    bottomCtx.clearRect(0, 0, WORLD_W, WORLD_H);
+    bottomCtx.clearRect(0, 0, offW(), offH());
     bottomCtx.drawImage(merged, 0, 0);
-    getLayerCtx(topId).clearRect(0, 0, WORLD_W, WORLD_H);
+
+    // Limpiar offscreen de la capa superior
+    getLayerCtx(topId).clearRect(0, 0, offW(), offH());
+
+    requestFrame();
+  };
+
+  // Actualiza la opacidad en layersRef DIRECTO sin pasar por React
+  // Así compositeNow ve el valor actualizado en el mismo frame → slider 60fps
+  (Canvas as any)._setLayerOpacityLive = (layerId: number, opacity: number) => {
+    const layer = layersRef.current.find(l => l.id === layerId);
+    if (layer) layer.opacity = opacity;
     requestFrame();
   };
 
@@ -961,6 +928,8 @@ export default function Canvas({
       ref={canvasRef}
       style={{
         position:"fixed", top:52, left:52,
+        // El tamaño real lo setea el JS (resize-aware, DPR-aware)
+        // No usamos CSS calc() para evitar desfases con canvas.width
         display:"block",
         cursor:panMode?"grab":"crosshair",
         touchAction:"none",
