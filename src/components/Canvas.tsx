@@ -436,6 +436,18 @@ export default function Canvas({
         if (data.bgColor) onBgColor?.(data.bgColor);
         if (data.myUserId) myUserIdRef.current = data.myUserId;
         onLayerEventRef.current?.({ type:"init_layers", layers: data.layers||[], myUserId: data.myUserId });
+
+        // ── FIX CLAVE (bug de "se pierde todo al refrescar") ──────────────
+        // onLayerEventRef dispara setLayers() en App.tsx, pero React no
+        // re-renderiza de forma síncrona: layersRef.current todavía tiene
+        // el valor VIEJO (vacío, de antes del join) en este mismo tick.
+        // redrawFull() de abajo llama a rebuildAllLayers(), que usa
+        // layersRef.current para saber qué canvases de capa crear.
+        // Si no actualizamos layersRef.current AQUÍ Y AHORA, rebuildAllLayers
+        // no encuentra ninguna capa (o las capas equivocadas) y los strokes
+        // que sí llegaron en strokesRef.current nunca se pintan en pantalla.
+        layersRef.current = data.layers || [];
+
         const pending=imagesRef.current.filter(img=>!imgCache.has(img.id));
         if(pending.length===0){redrawFull();return;}
         let loaded=0;
@@ -479,9 +491,13 @@ export default function Canvas({
         const uid = data.userId;
         const mine = (data.strokes || []).map((s: any) => ({...s, _uid: uid, _sid: s._sid || genSid()}));
         strokesRef.current = [...strokesRef.current.filter((s: any) => s._uid !== uid), ...mine];
-        const affected: number[] = data.affectedLayers || [];
-        if (affected.length) affected.forEach((id: number) => rebuildLayerCanvas(id));
-        else rebuildAllLayers();
+        // FIX (bug de undo/redo desincronizado): reconstruir TODAS las capas
+        // en vez de solo las "afectadas" según affectedLayers. El cálculo de
+        // affectedLayers en el servidor puede no incluir capas que quedaron
+        // vacías tras el undo (un layerId que ya no aparece en ningún stroke
+        // nuevo no se marca como afectado, pero su canvas local sigue
+        // mostrando el trazo viejo hasta que se reconstruye explícitamente).
+        rebuildAllLayers();
         requestFrame(); return;
       }
       if(data.type==="layer_added"){ onLayerEventRef.current?.(data); getLayerCanvas(data.layer.id); requestFrame(); return; }
