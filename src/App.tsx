@@ -16,6 +16,14 @@ type Stroke = {
 
 const MAX_HISTORY       = 50;
 const MAX_COLOR_HISTORY = 8;
+// FIX (undo "deshace 3-4 líneas de golpe"): tiempo mínimo entre ejecuciones
+// reales de undo/redo. El botón, el atajo de teclado y el gesto táctil
+// pueden todos disparar el mismo evento casi simultáneamente (por ejemplo,
+// un click que también triggerea el listener de teclado, o un gesto táctil
+// que se detecta dos veces por touch + pointer events). Sin protección,
+// cada uno de esos disparos hace pop() del undo stack, deshaciendo varios
+// trazos de un solo gesto del usuario.
+const UNDO_DEBOUNCE_MS = 180;
 
 function getLayerLimit(cs: CanvasSize): number {
   if (!cs) return 12;
@@ -71,6 +79,10 @@ function App() {
   const [redoLen, setRedoLen] = useState(0);
   const canvasApiRef = useRef<{ getMyStrokes: () => Stroke[]; setMyStrokes: (s: Stroke[]) => void } | null>(null);
 
+  // FIX: timestamp del último undo/redo realmente ejecutado, para descartar
+  // disparos duplicados que lleguen dentro de la ventana de debounce.
+  const lastUndoActionRef = useRef(0);
+
   const setColor = useCallback((c: string) => setColorRaw(c), []);
 
   const onStrokeFinished = useCallback((strokeColor: string) => {
@@ -93,6 +105,12 @@ function App() {
   }, []);
 
   const handleUndo = useCallback(() => {
+    // FIX: ignora disparos repetidos que lleguen demasiado rápido seguidos
+    // (mismo gesto detectado por más de un listener, doble-click accidental, etc.)
+    const now = performance.now();
+    if (now - lastUndoActionRef.current < UNDO_DEBOUNCE_MS) return;
+    lastUndoActionRef.current = now;
+
     const api = canvasApiRef.current;
     if (!api || !undoStackRef.current.length) return;
     redoStackRef.current = [...redoStackRef.current, [...api.getMyStrokes()]];
@@ -103,6 +121,13 @@ function App() {
   }, []);
 
   const handleRedo = useCallback(() => {
+    // Mismo debounce que handleUndo — comparten la ventana de tiempo para
+    // que un undo seguido inmediatamente de un redo (u otro patrón mixto)
+    // no se trate como "rebote" del mismo gesto.
+    const now = performance.now();
+    if (now - lastUndoActionRef.current < UNDO_DEBOUNCE_MS) return;
+    lastUndoActionRef.current = now;
+
     const api = canvasApiRef.current;
     if (!api || !redoStackRef.current.length) return;
     undoStackRef.current = [...undoStackRef.current, [...api.getMyStrokes()]];

@@ -72,6 +72,38 @@ function genSid(): string {
   return `${Date.now().toString(36)}-${(sidCounter++).toString(36)}-${Math.random().toString(36).slice(2,7)}`;
 }
 
+// ── FIX (undo/redo no sincronizado): envío con reintento ──────────────────
+// El bug real: wsRef.current?.readyState===WebSocket.OPEN se evalúa UNA vez.
+// Si el socket está reconectando justo en ese instante (lag, reconexión tras
+// inactividad, etc.), el mensaje undo_sync simplemente se descarta sin aviso.
+// Localmente el undo se ve bien (ya se aplicó en el canvas), pero el server
+// y los demás usuarios nunca se enteran. sendReliable reintenta hasta que
+// el socket esté abierto, con un límite de intentos para no encolar para
+// siempre si la conexión está realmente caída.
+function sendReliable(
+  getWs: () => WebSocket | null,
+  msg: object,
+  maxAttempts = 8,
+  delayMs = 250
+) {
+  let attempts = 0;
+  const tryNow = () => {
+    const ws = getWs();
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(msg));
+      return;
+    }
+    attempts++;
+    if (attempts < maxAttempts) {
+      setTimeout(tryNow, delayMs);
+    }
+    // Si se agotan los intentos, el socket sigue cerrado y al reconectar
+    // se manda un "join" de nuevo que trae el estado real desde el servidor,
+    // así que no queda en un limbo permanente — solo se pierde este undo puntual.
+  };
+  tryNow();
+}
+
 const stampCache = new Map<string, HTMLCanvasElement>();
 const STAMP_MAX  = 128;
 function getCachedStamp(key: string, dim: number, paint: (sc: CanvasRenderingContext2D, half: number) => void) {
@@ -713,8 +745,9 @@ export default function Canvas({
         // Reconstruir TODAS mis capas afectadas anteriormente también (seguridad ante undo que vacía una capa)
         layersRef.current.forEach(l => { if (l.ownerId === uid) rebuildLayerCanvas(l.id); });
         requestFrame();
-        if(wsRef.current?.readyState===WebSocket.OPEN)
-          wsRef.current.send(JSON.stringify({type:"undo_sync",strokes:marked}));
+        // FIX: sendReliable reintenta automáticamente si el WS no está
+        // abierto en este instante exacto, en vez de descartar el mensaje.
+        sendReliable(() => wsRef.current, {type:"undo_sync", strokes: marked});
       };
       onStrokeAddedRef.current?.(getMyStrokes,setMyStrokes);
       requestFrame();
