@@ -1,6 +1,6 @@
 import { WebSocketServer, WebSocket } from "ws";
 import { createServer } from "http";
-import { readFileSync, existsSync } from "fs";
+import { readFileSync, existsSync, readdirSync } from "fs";
 import { join, extname } from "path";
 import { createClient } from "@supabase/supabase-js";
 
@@ -21,6 +21,15 @@ const supabase = process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY
   : null;
 
 console.log(`📁 Serving dist from: ${distPath}`);
+try {
+  const assetsPath = join(distPath, "assets");
+  const files = readdirSync(assetsPath);
+  console.log(`📦 Archivos en dist/assets: ${files.join(", ")}`);
+  const htmlContent = readFileSync(join(distPath, "index.html"), "utf-8");
+  console.log(`📄 index.html apunta a: ${htmlContent.match(/index-[\w]+\.js/)?.[0] || "no encontrado"}`);
+} catch (e) {
+  console.log(`⚠️ Error leyendo dist:`, e);
+}
 console.log(supabase
   ? "✅ Supabase conectado — persistencia activa"
   : "⚠️  Sin Supabase — modo solo RAM"
