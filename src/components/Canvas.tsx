@@ -340,7 +340,16 @@ export default function Canvas({
     dirtyLayersRef.current.delete(layerId);
   };
   const rebuildAllLayers = () => {
+    // FIX (undo remoto no se refleja sin refrescar): antes solo se
+    // reconstruían las capas listadas en layersRef.current. Pero ese ref
+    // puede no incluir todas las capas que ya tienen strokes dibujados —
+    // por ejemplo si la capa se creó/vio antes de que este usuario llegara
+    // a la sala. Unimos los IDs de layersRef.current con los layerId que
+    // aparecen realmente en los strokes, así cualquier canvas de capa con
+    // contenido se reconstruye, sin depender de que la lista de capas esté
+    // 100% sincronizada en ese instante.
     const ids = new Set(layersRef.current.map(l => l.id));
+    strokesRef.current.forEach(s => { if (s.layerId != null) ids.add(s.layerId); });
     ids.forEach(id => rebuildLayerCanvas(id));
     dirtyLayersRef.current.clear();
   };
@@ -520,17 +529,24 @@ export default function Canvas({
         redrawFull(); return;
       }
       if(data.type==="undo_sync_remote"){
+        console.log("🔍 [DEBUG] undo_sync_remote recibido:", {
+          userId: data.userId,
+          strokesCount: (data.strokes || []).length,
+          myLayersKnown: layersRef.current.map(l => l.id),
+          layerIdsInIncoming: [...new Set((data.strokes||[]).map((s:any)=>s.layerId))],
+        });
         const uid = data.userId;
         const mine = (data.strokes || []).map((s: any) => ({...s, _uid: uid, _sid: s._sid || genSid()}));
         strokesRef.current = [...strokesRef.current.filter((s: any) => s._uid !== uid), ...mine];
-        // FIX (bug de undo/redo desincronizado): reconstruir TODAS las capas
-        // en vez de solo las "afectadas" según affectedLayers. El cálculo de
-        // affectedLayers en el servidor puede no incluir capas que quedaron
-        // vacías tras el undo (un layerId que ya no aparece en ningún stroke
-        // nuevo no se marca como afectado, pero su canvas local sigue
-        // mostrando el trazo viejo hasta que se reconstruye explícitamente).
-        rebuildAllLayers();
-        requestFrame(); return;
+        // FIX (undo remoto no se refleja sin refrescar): redrawFull() hace
+        // rebuildAllLayers() + requestFrame() de forma consistente con el
+        // resto del código. rebuildAllLayers ahora también considera los
+        // layerId presentes en strokesRef.current (ver fix arriba), así que
+        // cualquier capa con contenido se reconstruye y se pinta, incluso si
+        // por algún motivo no estaba 100% sincronizada en layersRef.current.
+        redrawFull();
+        console.log("🔍 [DEBUG] después de redrawFull, strokesRef.current.length:", strokesRef.current.length);
+        return;
       }
       if(data.type==="layer_added"){ onLayerEventRef.current?.(data); getLayerCanvas(data.layer.id); requestFrame(); return; }
       if(data.type==="layer_update"){ onLayerEventRef.current?.(data); requestFrame(); return; }
