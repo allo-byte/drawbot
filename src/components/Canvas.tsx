@@ -538,14 +538,21 @@ export default function Canvas({
         const uid = data.userId;
         const mine = (data.strokes || []).map((s: any) => ({...s, _uid: uid, _sid: s._sid || genSid()}));
         strokesRef.current = [...strokesRef.current.filter((s: any) => s._uid !== uid), ...mine];
-        // FIX (undo remoto no se refleja sin refrescar): redrawFull() hace
-        // rebuildAllLayers() + requestFrame() de forma consistente con el
-        // resto del código. rebuildAllLayers ahora también considera los
-        // layerId presentes en strokesRef.current (ver fix arriba), así que
-        // cualquier capa con contenido se reconstruye y se pinta, incluso si
-        // por algún motivo no estaba 100% sincronizada en layersRef.current.
-        redrawFull();
-        console.log("🔍 [DEBUG] después de redrawFull, strokesRef.current.length:", strokesRef.current.length);
+        // FIX (undo remoto no se refleja sin refrescar): rebuildAllLayers ya
+        // considera los layerId presentes en strokesRef.current (ver fix
+        // arriba), pero requestFrame() tiene un guard (rafRef.current!==null)
+        // que puede ignorar la solicitud si hay una condición de carrera con
+        // un frame que está terminando justo en ese instante. En ese caso el
+        // canvas interno se actualiza correctamente pero la pantalla nunca
+        // se repinta — visualmente parece "atascado" hasta el próximo evento
+        // que sí logre pedir un frame (como refrescar la página).
+        // Forzamos rafRef.current = null para garantizar que requestFrame()
+        // SIEMPRE encole un nuevo frame después de un undo remoto, sin
+        // importar el estado de cualquier frame en vuelo.
+        rebuildAllLayers();
+        rafRef.current = null;
+        requestFrame();
+        console.log("🔍 [DEBUG] después de forzar repaint, strokesRef.current.length:", strokesRef.current.length);
         return;
       }
       if(data.type==="layer_added"){ onLayerEventRef.current?.(data); getLayerCanvas(data.layer.id); requestFrame(); return; }
