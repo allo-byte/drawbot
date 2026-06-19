@@ -72,6 +72,23 @@ function genSid(): string {
   return `${Date.now().toString(36)}-${(sidCounter++).toString(36)}-${Math.random().toString(36).slice(2,7)}`;
 }
 
+// FIX (capas/usuarios duplicados en cada refresh): genera un userId una
+// sola vez por navegador y lo guarda en localStorage. Cada conexión nueva
+// (incluyendo refrescos de página) reusa el mismo ID, así el servidor te
+// reconoce como el mismo usuario en vez de crear una identidad/capa nueva
+// cada vez. Esto también es necesario para que el undo/redo de una sesión
+// anterior siga aplicando correctamente a "tus" capas tras refrescar.
+function getOrCreatePersistentUserId(): string {
+  const KEY = "peonypaint-client-uid";
+  try {
+    const existing = localStorage.getItem(KEY);
+    if (existing && /^[a-z0-9]{4,12}$/i.test(existing)) return existing;
+  } catch {}
+  const fresh = Math.random().toString(36).substring(2, 9);
+  try { localStorage.setItem(KEY, fresh); } catch {}
+  return fresh;
+}
+
 // ── FIX (undo/redo no sincronizado): envío con reintento ──────────────────
 // El bug real: wsRef.current?.readyState===WebSocket.OPEN se evalúa UNA vez.
 // Si el socket está reconectando justo en ese instante (lag, reconexión tras
@@ -452,7 +469,7 @@ export default function Canvas({
       ws.onopen = () => {
         reconnectDelay = 1000;
         onConnectionChangeRef.current?.("connected");
-        ws.send(JSON.stringify({type:"join", room, username: usernameRef.current}));
+        ws.send(JSON.stringify({type:"join", room, username: usernameRef.current, clientUserId: getOrCreatePersistentUserId()}));
         if (pingInterval) clearInterval(pingInterval);
         pingInterval = setInterval(() => {
           if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({type:"ping"}));

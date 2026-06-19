@@ -171,7 +171,15 @@ function getLayerLimit(canvasW: number, canvasH: number): number {
 wss.on("connection", (ws: WebSocket) => {
   let roomId   = "default";
   let username = "Invitado";
-  const userId = Math.random().toString(36).substring(2, 9);
+  // FIX (capas/usuarios duplicados en cada refresh): antes era `const`
+  // generado siempre con Math.random(), así que cada reconexión (cada
+  // refresh de página) creaba un usuario nuevo desde el punto de vista del
+  // servidor — capa nueva, identidad nueva, y el undo de la sesión anterior
+  // quedaba huérfano. Ahora el cliente puede enviar un clientUserId que
+  // persiste en su localStorage; si lo manda y tiene un formato válido, lo
+  // reusamos como userId en vez de generar uno random. Así refrescar la
+  // página te mantiene siendo "el mismo usuario" en la sala.
+  let userId = Math.random().toString(36).substring(2, 9);
 
   ws.on("message", async (raw: Buffer) => {
     let data: any;
@@ -182,6 +190,17 @@ wss.on("connection", (ws: WebSocket) => {
     if (data.type === "join") {
       username = (data.username || "Invitado").slice(0, 24);
       roomId   = data.room || "default";
+
+      // FIX: si el cliente manda un clientUserId válido (string alfanumérico
+      // corto, generado y guardado en su localStorage en una sesión previa),
+      // lo adoptamos como nuestro userId para esta conexión. Esto evita que
+      // cada refresh cree una identidad nueva con su propia capa nueva.
+      if (
+        typeof data.clientUserId === "string" &&
+        /^[a-z0-9]{4,12}$/i.test(data.clientUserId)
+      ) {
+        userId = data.clientUserId;
+      }
 
       if (!rooms.has(roomId))       rooms.set(roomId, new Set());
       if (!roomStrokes.has(roomId)) roomStrokes.set(roomId, []);
