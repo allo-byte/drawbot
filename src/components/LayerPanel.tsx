@@ -83,19 +83,35 @@ function OpacitySlider({ layerId, initialOpacity, onLive, onCommit }: {
     onLive(layerId, val / 100); // actualiza layersRef directo → compositeNow ve el valor nuevo
   }, [layerId, onLive]);
 
+  // FIX (slider de opacidad bugeado / no responde): el código anterior
+  // usaba e.currentTarget dentro de los listeners onMove/onUp, que se
+  // ejecutan en un momento DIFERENTE al evento original de React. React
+  // recicla el objeto de evento sintético (event pooling) después de que
+  // el handler de onPointerDown termina, así que para cuando el usuario
+  // suelta el dedo/mouse, e.currentTarget ya puede ser null —
+  // provocando "Cannot read properties of null (reading
+  // 'releasePointerCapture')" y dejando el slider completamente
+  // congelado a partir de ese primer intento fallido.
+  // Solución: capturar la referencia real del elemento DOM en una
+  // variable normal (el propio nodo, no el evento sintético) ANTES de
+  // crear los listeners diferidos, y usar esa variable en vez de
+  // e.currentTarget dentro de onMove/onUp.
   const handlePointer = useCallback((e: React.PointerEvent) => {
-    e.currentTarget.setPointerCapture(e.pointerId);
+    const el = e.currentTarget as HTMLDivElement; // referencia real al nodo DOM, estable
+    el.setPointerCapture(e.pointerId);
     calc(e.clientY);
 
     const onMove = (ev: PointerEvent) => calc(ev.clientY);
     const onUp   = (ev: PointerEvent) => {
-      e.currentTarget.releasePointerCapture(ev.pointerId);
-      e.currentTarget.removeEventListener("pointermove", onMove as any);
-      e.currentTarget.removeEventListener("pointerup",   onUp   as any);
+      // FIX: usar la variable `el` capturada arriba, nunca e.currentTarget
+      // dentro de este closure — el evento React original ya no es válido.
+      try { el.releasePointerCapture(ev.pointerId); } catch {}
+      el.removeEventListener("pointermove", onMove);
+      el.removeEventListener("pointerup",   onUp);
       onCommit(layerId, valRef.current / 100); // propagar a React + WS al soltar
     };
-    (e.currentTarget as HTMLDivElement).addEventListener("pointermove", onMove as any);
-    (e.currentTarget as HTMLDivElement).addEventListener("pointerup",   onUp   as any);
+    el.addEventListener("pointermove", onMove);
+    el.addEventListener("pointerup",   onUp);
   }, [layerId, calc, onCommit]);
 
   const pct = display;
