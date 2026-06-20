@@ -50,6 +50,7 @@ type Props = {
   setUsers?: (users: string[]) => void;
   onReady?: (saveFn: () => void, uploadFn: (file: File) => void) => void;
   onBgColor?: (color: string) => void;
+  onCanvasSizeFromServer?: (size: { w: number; h: number }) => void;
   onStrokeAdded?: (get: () => Stroke[], set: (s: Stroke[]) => void) => void;
   onStrokeFinished?: (color: string) => void;
   onLayerEvent?: (event: LayerEvent) => void;
@@ -148,7 +149,7 @@ const DEFAULT_H = 1668;
 export default function Canvas({
   color, brushSize, opacity, eraser, brushType, panMode, username,
   bgColor, canvasSize, layers, activeLayerId,
-  setUsers, onReady, onBgColor, onStrokeAdded, onStrokeFinished, onLayerEvent,
+  setUsers, onReady, onBgColor, onCanvasSizeFromServer, onStrokeAdded, onStrokeFinished, onLayerEvent,
   onConnectionChange,
 }: Props) {
   const canvasRef         = useRef<HTMLCanvasElement>(null);
@@ -200,6 +201,7 @@ export default function Canvas({
   const onStrokeFinishedRef    = useRef(onStrokeFinished);
   const onLayerEventRef        = useRef(onLayerEvent);
   const onConnectionChangeRef  = useRef(onConnectionChange);
+  const onCanvasSizeFromServerRef = useRef(onCanvasSizeFromServer);
 
   colorRef.current = color; sizeRef.current = brushSize; opacityRef.current = opacity;
   eraserRef.current = eraser; brushTypeRef.current = brushType; panModeRef.current = panMode;
@@ -207,6 +209,7 @@ export default function Canvas({
   layersRef.current = layers; activeLayerRef.current = activeLayerId;
   onStrokeAddedRef.current = onStrokeAdded; onStrokeFinishedRef.current = onStrokeFinished;
   onLayerEventRef.current = onLayerEvent; onConnectionChangeRef.current = onConnectionChange;
+  onCanvasSizeFromServerRef.current = onCanvasSizeFromServer;
 
   const MIN_SCALE = 0.05, MAX_SCALE = 10;
   // FREEZE_MS: tiempo que esperamos con 1 dedo quieto antes de comprometer el trazo.
@@ -492,6 +495,11 @@ export default function Canvas({
         strokesRef.current = (data.strokes||[]).map((s: Stroke) => s._sid ? s : {...s, _sid: genSid()});
         imagesRef.current  = data.images ||[];
         if (data.bgColor) onBgColor?.(data.bgColor);
+        // FIX (tamaño de lienzo vuelve a default al refrescar): si el
+        // servidor ya tiene un tamaño guardado para esta sala, lo aplicamos.
+        // Si es null (sala nueva, nadie cambió el tamaño aún), se mantiene
+        // el default local de App.tsx sin tocar nada.
+        if (data.canvasSize) onCanvasSizeFromServerRef.current?.(data.canvasSize);
         if (data.myUserId) myUserIdRef.current = data.myUserId;
         onLayerEventRef.current?.({ type:"init_layers", layers: data.layers||[], myUserId: data.myUserId });
 
@@ -541,6 +549,10 @@ export default function Canvas({
         requestFrame(); return;
       }
       if(data.type==="bgcolor"){ onBgColor?.(data.color); return; }
+      if(data.type==="canvas_resize"){
+        onCanvasSizeFromServerRef.current?.({ w: data.w, h: data.h });
+        return;
+      }
       if(data.type==="reload_strokes"){
         strokesRef.current=(data.strokes||[]).map((s: Stroke) => s._sid ? s : {...s, _sid: genSid()});
         redrawFull(); return;

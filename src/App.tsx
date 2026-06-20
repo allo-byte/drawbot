@@ -43,7 +43,7 @@ function App() {
   const [brushType,     setBrushType ] = useState<BrushType>("pen");
   const [panMode,       setPanMode   ] = useState(false);
   const [bgColor,       setBgColor   ] = useState("#111111");
-  const [canvasSize,    setCanvasSize] = useState<CanvasSize>({ w: 1024, h: 768 });
+  const [canvasSize,    setCanvasSizeRaw] = useState<CanvasSize>({ w: 1024, h: 768 });
   const [savePNG,       setSavePNG   ] = useState<() => void>(() => () => {});
   const [users,         setUsers     ] = useState<string[]>([]);
   const [profile,       setProfileRaw] = useState<Profile>(getStoredProfile);
@@ -84,6 +84,26 @@ function App() {
   const lastUndoActionRef = useRef(0);
 
   const setColor = useCallback((c: string) => setColorRaw(c), []);
+
+  // FIX (tamaño de lienzo vuelve a default al refrescar): setCanvasSize
+  // ahora envía el cambio al servidor además de actualizar el estado local,
+  // así la sala recuerda el tamaño elegido para todos los usuarios.
+  const setCanvasSize = useCallback((sizeOrFn: CanvasSize | ((prev: CanvasSize) => CanvasSize)) => {
+    setCanvasSizeRaw(prev => {
+      const next = typeof sizeOrFn === "function" ? (sizeOrFn as any)(prev) : sizeOrFn;
+      if (next && (next.w !== prev?.w || next.h !== prev?.h)) {
+        (Canvas as any)._sendWS?.({ type: "canvas_resize", w: next.w, h: next.h });
+      }
+      return next;
+    });
+  }, []);
+
+  // Cuando el servidor nos informa el tamaño guardado de la sala (al unirnos
+  // o cuando otro usuario lo cambia), lo aplicamos SIN volver a enviarlo de
+  // vuelta — solo actualizamos el estado local directamente.
+  const handleCanvasSizeFromServer = useCallback((size: { w: number; h: number }) => {
+    setCanvasSizeRaw(size);
+  }, []);
 
   const onStrokeFinished = useCallback((strokeColor: string) => {
     if (!strokeColor || strokeColor === "eraser") return;
@@ -366,6 +386,7 @@ function App() {
         setUsers={setUsers}
         onReady={(fn) => setSavePNG(() => fn)}
         onBgColor={(c) => setBgColor(c)}
+        onCanvasSizeFromServer={handleCanvasSizeFromServer}
         onStrokeAdded={onStrokeAdded}
         onStrokeFinished={onStrokeFinished}
         onLayerEvent={handleLayerEvent}

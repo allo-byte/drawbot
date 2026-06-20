@@ -59,6 +59,10 @@ const rooms        = new Map<string, Set<WebSocket>>();
 const roomStrokes  = new Map<string, Stroke[]>();
 const roomUsers    = new Map<string, Map<string, string>>();
 const roomBgColor  = new Map<string, string>();
+// FIX (tamaño de lienzo vuelve a default al refrescar): el canvasSize nunca
+// se enviaba al servidor, solo vivía en el estado local de React de cada
+// navegador. roomCanvasSize lo guarda por sala, igual que roomBgColor.
+const roomCanvasSize = new Map<string, { w: number; h: number }>();
 const roomLayers   = new Map<string, Layer[]>();
 const roomImages   = new Map<string, RoomImage[]>();
 const roomLoaded   = new Set<string>(); // rooms ya cargadas desde DB
@@ -83,8 +87,11 @@ async function loadRoomFromDB(roomId: string) {
 
   // Cargar color de fondo
   const { data: room } = await supabase
-    .from("rooms").select("bg_color").eq("id", roomId).single();
+    .from("rooms").select("bg_color, canvas_w, canvas_h").eq("id", roomId).single();
   if (room?.bg_color) roomBgColor.set(roomId, room.bg_color);
+  if (room?.canvas_w && room?.canvas_h) {
+    roomCanvasSize.set(roomId, { w: room.canvas_w, h: room.canvas_h });
+  }
 
   // Cargar strokes
   const { data: strokes } = await supabase
@@ -233,6 +240,7 @@ wss.on("connection", (ws: WebSocket) => {
         strokes:  roomStrokes.get(roomId) || [],
         images:   roomImages.get(roomId)  || [],
         bgColor:  roomBgColor.get(roomId) || null,
+        canvasSize: roomCanvasSize.get(roomId) || null,
         layers:   roomLayers.get(roomId)  || [],
         myUserId: userId,
       }));
@@ -290,6 +298,24 @@ wss.on("connection", (ws: WebSocket) => {
       roomBgColor.set(roomId, data.color);
       saveBgColor(roomId, data.color); // fire-and-forget
       broadcast(roomId, ws, { type: "bgcolor", color: data.color });
+      return;
+    }
+
+    // FIX (tamaño de lienzo vuelve a default al refrescar): el tamaño se
+    // comparte por sala igual que el color de fondo. Se guarda en RAM
+    // (roomCanvasSize) y se respalda en la tabla rooms de Supabase, para
+    // sobrevivir reinicios del servidor por inactividad.
+    if (data.type === "canvas_resize") {
+      const w = Number(data.w), h = Number(data.h);
+      if (!Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) return;
+      roomCanvasSize.set(roomId, { w, h });
+      if (supabase) {
+        supabase.from("rooms").upsert(
+          { id: roomId, canvas_w: w, canvas_h: h, updated_at: new Date().toISOString() },
+          { onConflict: "id" }
+        ).then(); // fire-and-forget
+      }
+      broadcastAll(roomId, { type: "canvas_resize", w, h });
       return;
     }
 
