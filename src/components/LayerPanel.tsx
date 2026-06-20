@@ -143,27 +143,42 @@ function OpacitySlider({ layerId, initialOpacity, onLive, onCommit }: {
 
   const pct = display;
   return (
-    <div style={{padding:"4px 0 2px", width:"100%", display:"flex", alignItems:"center", gap:6}} onClick={e => e.stopPropagation()}>
+    <div style={{padding:"6px 0 4px", width:"100%", display:"flex", alignItems:"center", gap:6}} onClick={e => e.stopPropagation()}>
       <span style={{fontSize:8, color:"#3a3a3a", flexShrink:0, width:22}}>OPA</span>
-      <div ref={trackRef}
-        style={{
-          position:"relative", height:4, borderRadius:2, flex:1,
-          background:"#1e1e1e", cursor:"pointer", touchAction:"none",
-        }}
+      <div
+        // FIX (bola difícil de tocar en móvil): wrapper con padding
+        // vertical que amplía el área real de toque sin afectar la
+        // altura visual de la barra (eso vive en el div interno de 5px).
+        // Un dedo necesita más margen de error que un cursor de mouse
+        // para "atrapar" la pista al primer intento.
+        style={{ flex:1, padding:"9px 0", touchAction:"none", cursor:"pointer" }}
         onPointerDown={handlePointer}
       >
-        <div style={{
-          position:"absolute", left:0, top:0, bottom:0,
-          width:`${pct}%`, borderRadius:2, background:"#7070dd",
-          pointerEvents:"none",
-        }}/>
-        <div style={{
-          position:"absolute", top:"50%", left:`${pct}%`,
-          transform:"translate(-50%,-50%)",
-          width:10, height:10, borderRadius:"50%",
-          background:"#7070dd", border:"1.5px solid #aaaaff",
-          pointerEvents:"none",
-        }}/>
+        <div ref={trackRef}
+          style={{
+            position:"relative", height:5, borderRadius:2.5,
+            background:"#1e1e1e",
+          }}
+        >
+          <div style={{
+            position:"absolute", left:0, top:0, bottom:0,
+            width:`${pct}%`, borderRadius:2.5, background:"#7070dd",
+            pointerEvents:"none",
+          }}/>
+          {/* FIX (bola del slider muy pequeña, difícil de tocar en
+              móvil): agrandada de 10px a 18px. El área de toque real en
+              dispositivos táctiles necesita al menos ~18-24px para ser
+              cómoda; 10px era apropiado para un mouse con precisión de
+              pixel, pero no para un dedo. */}
+          <div style={{
+            position:"absolute", top:"50%", left:`${pct}%`,
+            transform:"translate(-50%,-50%)",
+            width:18, height:18, borderRadius:"50%",
+            background:"#7070dd", border:"2px solid #aaaaff",
+            boxShadow:"0 1px 4px rgba(0,0,0,0.4)",
+            pointerEvents:"none",
+          }}/>
+        </div>
       </div>
       <span style={{fontSize:9, color:"#555", flexShrink:0, width:28, textAlign:"right"}}>{display}%</span>
     </div>
