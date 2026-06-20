@@ -271,10 +271,10 @@ export default function LayerPanel({
           padding:2px 4px; outline:none;
         }
         .lp-blend-select {
-          width:100%; margin-top:2px;
+          width:100%; margin-bottom:6px;
           background:#111; border:0.5px solid #2a2a2a;
-          border-radius:4px; color:#555; font-size:9px;
-          padding:2px 4px; outline:none; cursor:pointer;
+          border-radius:5px; color:#777; font-size:10px;
+          padding:4px 6px; outline:none; cursor:pointer;
           transition:border-color .12s;
         }
         .lp-blend-select:focus { border-color:#7070dd; color:#aaa; }
@@ -328,83 +328,86 @@ export default function LayerPanel({
             const origIdx = myLayers.length - 1 - rIdx;
             const isActive = layer.id === activeLayerId;
             return (
-              <div key={layer.id}
-                className={`lp-item${isActive?" active":""}${dragOverIdx===origIdx?" drag-over":""}`}
-                onClick={() => onSelect(layer.id)}
-                draggable
-                onDragStart={() => setDragIdx(origIdx)}
-                onDragOver={e => { e.preventDefault(); setDragOverIdx(origIdx); }}
-                onDragLeave={() => setDragOverIdx(null)}
-                onDrop={() => {
-                  if (dragIdx !== null && dragIdx !== origIdx) onReorder(dragIdx, origIdx);
-                  setDragIdx(null); setDragOverIdx(null);
-                }}
-                onDragEnd={() => { setDragIdx(null); setDragOverIdx(null); }}
-              >
-                <span className="lp-handle">⠿</span>
-                <div className="lp-thumb">{layer.id}</div>
-                <div className="lp-info">
-                  {editingId === layer.id ? (
-                    <input autoFocus className="lp-name-input"
-                      value={nameDraft}
-                      onChange={e => setNameDraft(e.target.value)}
-                      onBlur={() => commitRename(layer.id)}
-                      onKeyDown={e => {
-                        if (e.key==="Enter") commitRename(layer.id);
-                        if (e.key==="Escape") setEditingId(null);
-                        e.stopPropagation();
-                      }}
-                      onClick={e => e.stopPropagation()}
-                    />
-                  ) : (
-                    <div className={`lp-name${!layer.visible?" dim":""}`}
-                      onDoubleClick={e => { e.stopPropagation(); startRename(layer); }}
-                      title="Doble clic para renombrar"
-                    >{layer.name}</div>
-                  )}
-                  {isActive && (
-                    <>
-                      <select className="lp-blend-select"
-                        value={layer.blendMode ?? "normal"}
-                        onChange={e => { e.stopPropagation(); onBlendMode(layer.id, e.target.value); }}
+              <div key={layer.id}>
+                <div
+                  className={`lp-item${isActive?" active":""}${dragOverIdx===origIdx?" drag-over":""}`}
+                  onClick={() => onSelect(layer.id)}
+                  draggable
+                  onDragStart={() => setDragIdx(origIdx)}
+                  onDragOver={e => { e.preventDefault(); setDragOverIdx(origIdx); }}
+                  onDragLeave={() => setDragOverIdx(null)}
+                  onDrop={() => {
+                    if (dragIdx !== null && dragIdx !== origIdx) onReorder(dragIdx, origIdx);
+                    setDragIdx(null); setDragOverIdx(null);
+                  }}
+                  onDragEnd={() => { setDragIdx(null); setDragOverIdx(null); }}
+                >
+                  <span className="lp-handle">⠿</span>
+                  <div className="lp-thumb">{layer.id}</div>
+                  <div className="lp-info">
+                    {editingId === layer.id ? (
+                      <input autoFocus className="lp-name-input"
+                        value={nameDraft}
+                        onChange={e => setNameDraft(e.target.value)}
+                        onBlur={() => commitRename(layer.id)}
+                        onKeyDown={e => {
+                          if (e.key==="Enter") commitRename(layer.id);
+                          if (e.key==="Escape") setEditingId(null);
+                          e.stopPropagation();
+                        }}
                         onClick={e => e.stopPropagation()}
-                      >
-                        {BLEND_MODES.map(m => <option key={m.id} value={m.id}>{m.label}</option>)}
-                      </select>
-                      {/* REDISEÑO: slider de opacidad integrado dentro de
-                          la fila de la capa activa, en vez de separado y
-                          fijo al fondo del panel. Así queda visualmente
-                          conectado a la capa que controla. */}
-                      <OpacitySlider
-                        key={layer.id}
-                        layerId={layer.id}
-                        initialOpacity={layer.opacity}
-                        onLive={onOpacityLive}
-                        onCommit={onOpacity}
                       />
-                    </>
-                  )}
+                    ) : (
+                      <div className={`lp-name${!layer.visible?" dim":""}`}
+                        onDoubleClick={e => { e.stopPropagation(); startRename(layer); }}
+                        title="Doble clic para renombrar"
+                      >{layer.name}</div>
+                    )}
+                  </div>
+                  <div className="lp-ops" onClick={e => e.stopPropagation()}>
+                    <button className={`lp-ibtn${layer.visible?" on":""}`}
+                      title={layer.visible?"Ocultar":"Mostrar"}
+                      onClick={() => onToggleVisibility(layer.id)}
+                    >{layer.visible?"👁":"◌"}</button>
+                    <button className={`lp-ibtn${layer.locked?" on":""}`}
+                      title={layer.locked?"Desbloquear":"Bloquear"}
+                      onClick={() => onToggleLock(layer.id)}
+                    >{layer.locked?"🔒":"🔓"}</button>
+                    <button className="lp-merge-btn"
+                      title={origIdx===0?"No hay capa debajo":"Fusionar con capa inferior"}
+                      disabled={origIdx===0}
+                      onClick={() => onMerge(layer.id)}
+                    >⤵</button>
+                    {myLayers.length > 1 && (
+                      <button className="lp-ibtn del" title="Eliminar"
+                        onClick={() => onDelete(layer.id)}
+                      >✕</button>
+                    )}
+                  </div>
                 </div>
-                <div className="lp-ops" onClick={e => e.stopPropagation()}>
-                  <button className={`lp-ibtn${layer.visible?" on":""}`}
-                    title={layer.visible?"Ocultar":"Mostrar"}
-                    onClick={() => onToggleVisibility(layer.id)}
-                  >{layer.visible?"👁":"◌"}</button>
-                  <button className={`lp-ibtn${layer.locked?" on":""}`}
-                    title={layer.locked?"Desbloquear":"Bloquear"}
-                    onClick={() => onToggleLock(layer.id)}
-                  >{layer.locked?"🔒":"🔓"}</button>
-                  <button className="lp-merge-btn"
-                    title={origIdx===0?"No hay capa debajo":"Fusionar con capa inferior"}
-                    disabled={origIdx===0}
-                    onClick={() => onMerge(layer.id)}
-                  >⤵</button>
-                  {myLayers.length > 1 && (
-                    <button className="lp-ibtn del" title="Eliminar"
-                      onClick={() => onDelete(layer.id)}
-                    >✕</button>
-                  )}
-                </div>
+                {/* REDISEÑO: blend mode + slider de opacidad ahora en su
+                    propio bloque con el ANCHO COMPLETO del panel, no
+                    compartiendo espacio con el thumbnail/iconos de la fila
+                    principal. Esto le da al slider mucho más recorrido
+                    real para arrastrar — antes vivía apretado dentro de
+                    .lp-info, que es solo una fracción del ancho total. */}
+                {isActive && (
+                  <div style={{padding:"2px 10px 8px 36px"}} onClick={e => e.stopPropagation()}>
+                    <select className="lp-blend-select"
+                      value={layer.blendMode ?? "normal"}
+                      onChange={e => onBlendMode(layer.id, e.target.value)}
+                    >
+                      {BLEND_MODES.map(m => <option key={m.id} value={m.id}>{m.label}</option>)}
+                    </select>
+                    <OpacitySlider
+                      key={layer.id}
+                      layerId={layer.id}
+                      initialOpacity={layer.opacity}
+                      onLive={onOpacityLive}
+                      onCommit={onOpacity}
+                    />
+                  </div>
+                )}
               </div>
             );
           })}
