@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from "react";
+import { useState, useRef, useCallback, useEffect } from "react";
 import type { Layer } from "./Canvas";
 
 const BLEND_MODES: { id: string; label: string }[] = [
@@ -62,6 +62,11 @@ function Avatar({ name, size = 18 }: { name: string; size?: number }) {
 // - El valor LOCAL se guarda en un ref (sin re-render)
 // - compositeNow lo lee directo via onOpacityLive que actualiza layersRef
 // - Solo al soltar (pointerup) se propaga a React + WS
+// REDISEÑO: slider de opacidad horizontal y compacto, integrado dentro de
+// la fila de la capa activa (como en Procreate/Photoshop), en vez de un
+// slider vertical separado y fijo al fondo del panel — eso obligaba al
+// usuario a mirar dos lugares distintos (la capa resaltada arriba, el
+// slider abajo) sin conexión visual clara entre ambos.
 function OpacitySlider({ layerId, initialOpacity, onLive, onCommit }: {
   layerId: number;
   initialOpacity: number;
@@ -70,77 +75,67 @@ function OpacitySlider({ layerId, initialOpacity, onLive, onCommit }: {
 }) {
   const valRef  = useRef(Math.round(initialOpacity * 100));
   const trackRef = useRef<HTMLDivElement>(null);
-  // FIX (slider no fluido): cachear el rect del track aquí, calculado UNA
-  // sola vez al iniciar el arrastre (pointerdown), en vez de llamar
-  // getBoundingClientRect() en cada pixel de movimiento del mouse/dedo.
-  // getBoundingClientRect fuerza un layout reflow del navegador — barato
-  // una vez, pero notablemente costoso si se repite decenas de veces por
-  // segundo durante un arrastre, especialmente dentro de un panel con
-  // scroll y muchos elementos como el de capas. El track no se mueve
-  // mientras se arrastra, así que cachearlo es seguro.
-  const cachedRectRef = useRef<{ top: number; height: number } | null>(null);
+  // Cachear el rect del track al iniciar el arrastre, no en cada
+  // movimiento — getBoundingClientRect fuerza un reflow costoso si se
+  // repite decenas de veces por segundo durante un drag.
+  const cachedRectRef = useRef<{ left: number; width: number } | null>(null);
   const [display, setDisplay] = useState(Math.round(initialOpacity * 100));
 
-  const calc = useCallback((clientY: number) => {
+  // Si otro usuario (o un undo/redo) cambia la opacidad de esta misma capa
+  // mientras la tenemos activa, reflejarlo — pero solo si NO estamos en
+  // medio de un arrastre propio (cachedRectRef no nulo = arrastrando).
+  useEffect(() => {
+    if (cachedRectRef.current !== null) return; // arrastrando, ignorar updates externos
+    const incoming = Math.round(initialOpacity * 100);
+    if (incoming !== valRef.current) {
+      valRef.current = incoming;
+      setDisplay(incoming);
+    }
+  }, [initialOpacity]);
+
+  const calc = useCallback((clientX: number) => {
     const rect = cachedRectRef.current;
     if (!rect) return;
-    const pct  = 1 - Math.max(0, Math.min(1, (clientY - rect.top) / rect.height));
-    const val  = Math.round(pct * 100);
+    const pct = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+    const val = Math.round(pct * 100);
     if (val === valRef.current) return;
     valRef.current = val;
-    setDisplay(val);           // solo re-render del slider, no de App
-    onLive(layerId, val / 100); // actualiza layersRef directo → compositeNow ve el valor nuevo
+    setDisplay(val);
+    onLive(layerId, val / 100);
   }, [layerId, onLive]);
 
-  // FIX (slider de opacidad bugeado / no responde): el código anterior
-  // usaba e.currentTarget dentro de los listeners onMove/onUp, que se
-  // ejecutan en un momento DIFERENTE al evento original de React. React
-  // recicla el objeto de evento sintético (event pooling) después de que
-  // el handler de onPointerDown termina, así que para cuando el usuario
-  // suelta el dedo/mouse, e.currentTarget ya puede ser null —
-  // provocando "Cannot read properties of null (reading
-  // 'releasePointerCapture')" y dejando el slider completamente
-  // congelado a partir de ese primer intento fallido.
-  // Solución: capturar la referencia real del elemento DOM en una
-  // variable normal (el propio nodo, no el evento sintético) ANTES de
-  // crear los listeners diferidos, y usar esa variable en vez de
-  // e.currentTarget dentro de onMove/onUp.
   const handlePointer = useCallback((e: React.PointerEvent) => {
-    const el = e.currentTarget as HTMLDivElement; // referencia real al nodo DOM, estable
+    e.stopPropagation(); // no debe seleccionar/arrastrar la fila de la capa
+    const el = e.currentTarget as HTMLDivElement;
     el.setPointerCapture(e.pointerId);
 
-    // FIX (slider no fluido): calcular el rect UNA vez aquí, al iniciar el
-    // arrastre — no en cada movimiento.
     const rect = el.getBoundingClientRect();
-    cachedRectRef.current = { top: rect.top, height: rect.height };
-    calc(e.clientY);
+    cachedRectRef.current = { left: rect.left, width: rect.width };
+    calc(e.clientX);
 
-    // FIX (slider no fluido, parte 2): los eventos pointermove pueden
-    // disparar mucho más rápido que la tasa de refresco real de la
-    // pantalla (hasta cientos de veces por segundo en algunos touchpads/
-    // mouses de alta frecuencia). Procesar cada uno individualmente
-    // saturaba el hilo principal con trabajo redundante. rafPendingRef
-    // asegura que solo se procese el movimiento más reciente una vez por
-    // frame de animación, que es la cadencia natural de la pantalla.
+    // Throttle con RAF: los eventos pointermove pueden disparar mucho más
+    // rápido que la tasa de refresco real de la pantalla. Solo procesamos
+    // el movimiento más reciente una vez por frame.
     let rafPending = false;
-    let lastClientY = e.clientY;
+    let lastClientX = e.clientX;
     const onMove = (ev: PointerEvent) => {
-      lastClientY = ev.clientY;
+      lastClientX = ev.clientX;
       if (rafPending) return;
       rafPending = true;
       requestAnimationFrame(() => {
         rafPending = false;
-        calc(lastClientY);
+        calc(lastClientX);
       });
     };
     const onUp = (ev: PointerEvent) => {
       // FIX: usar la variable `el` capturada arriba, nunca e.currentTarget
-      // dentro de este closure — el evento React original ya no es válido.
+      // dentro de este closure — el evento React original ya no es válido
+      // para cuando este listener se ejecuta.
       try { el.releasePointerCapture(ev.pointerId); } catch {}
       el.removeEventListener("pointermove", onMove);
       el.removeEventListener("pointerup",   onUp);
       cachedRectRef.current = null;
-      onCommit(layerId, valRef.current / 100); // propagar a React + WS al soltar
+      onCommit(layerId, valRef.current / 100);
     };
     el.addEventListener("pointermove", onMove);
     el.addEventListener("pointerup",   onUp);
@@ -148,17 +143,11 @@ function OpacitySlider({ layerId, initialOpacity, onLive, onCommit }: {
 
   const pct = display;
   return (
-    <div style={{padding:"8px 12px 10px", borderTop:"0.5px solid #1a1a1a", flexShrink:0}}>
-      <div style={{
-        fontSize:9, color:"#383838", textTransform:"uppercase", letterSpacing:".06em",
-        marginBottom:5, display:"flex", justifyContent:"space-between",
-      }}>
-        <span>Opacidad</span>
-        <span style={{color:"#555"}}>{display}%</span>
-      </div>
+    <div style={{padding:"4px 0 2px", width:"100%", display:"flex", alignItems:"center", gap:6}} onClick={e => e.stopPropagation()}>
+      <span style={{fontSize:8, color:"#3a3a3a", flexShrink:0, width:22}}>OPA</span>
       <div ref={trackRef}
         style={{
-          position:"relative", height:3, borderRadius:2,
+          position:"relative", height:4, borderRadius:2, flex:1,
           background:"#1e1e1e", cursor:"pointer", touchAction:"none",
         }}
         onPointerDown={handlePointer}
@@ -171,11 +160,12 @@ function OpacitySlider({ layerId, initialOpacity, onLive, onCommit }: {
         <div style={{
           position:"absolute", top:"50%", left:`${pct}%`,
           transform:"translate(-50%,-50%)",
-          width:11, height:11, borderRadius:"50%",
+          width:10, height:10, borderRadius:"50%",
           background:"#7070dd", border:"1.5px solid #aaaaff",
           pointerEvents:"none",
         }}/>
       </div>
+      <span style={{fontSize:9, color:"#555", flexShrink:0, width:28, textAlign:"right"}}>{display}%</span>
     </div>
   );
 }
@@ -215,8 +205,6 @@ export default function LayerPanel({
     if (t) onRename(id, t);
     setEditingId(null);
   };
-
-  const activeLayer = myLayers.find(l => l.id === activeLayerId);
 
   return (
     <>
@@ -375,13 +363,26 @@ export default function LayerPanel({
                     >{layer.name}</div>
                   )}
                   {isActive && (
-                    <select className="lp-blend-select"
-                      value={layer.blendMode ?? "normal"}
-                      onChange={e => { e.stopPropagation(); onBlendMode(layer.id, e.target.value); }}
-                      onClick={e => e.stopPropagation()}
-                    >
-                      {BLEND_MODES.map(m => <option key={m.id} value={m.id}>{m.label}</option>)}
-                    </select>
+                    <>
+                      <select className="lp-blend-select"
+                        value={layer.blendMode ?? "normal"}
+                        onChange={e => { e.stopPropagation(); onBlendMode(layer.id, e.target.value); }}
+                        onClick={e => e.stopPropagation()}
+                      >
+                        {BLEND_MODES.map(m => <option key={m.id} value={m.id}>{m.label}</option>)}
+                      </select>
+                      {/* REDISEÑO: slider de opacidad integrado dentro de
+                          la fila de la capa activa, en vez de separado y
+                          fijo al fondo del panel. Así queda visualmente
+                          conectado a la capa que controla. */}
+                      <OpacitySlider
+                        key={layer.id}
+                        layerId={layer.id}
+                        initialOpacity={layer.opacity}
+                        onLive={onOpacityLive}
+                        onCommit={onOpacity}
+                      />
+                    </>
                   )}
                 </div>
                 <div className="lp-ops" onClick={e => e.stopPropagation()}>
@@ -443,17 +444,6 @@ export default function LayerPanel({
             </div>
           ))}
         </div>
-
-        {/* Opacidad ultra fluida — sin pasar por React en cada tick */}
-        {activeLayer && (
-          <OpacitySlider
-            key={activeLayer.id}
-            layerId={activeLayer.id}
-            initialOpacity={activeLayer.opacity}
-            onLive={onOpacityLive}
-            onCommit={onOpacity}
-          />
-        )}
       </div>
     </>
   );
