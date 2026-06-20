@@ -51,7 +51,7 @@ type Props = {
   onReady?: (saveFn: () => void, uploadFn: (file: File) => void) => void;
   onBgColor?: (color: string) => void;
   onCanvasSizeFromServer?: (size: { w: number; h: number }) => void;
-  onStrokeAdded?: (get: () => Stroke[], set: (s: Stroke[]) => void) => void;
+  onUndoStateChange?: (state: { canUndo: boolean; canRedo: boolean }) => void;
   onStrokeFinished?: (color: string) => void;
   onLayerEvent?: (event: LayerEvent) => void;
   onConnectionChange?: (status: "connected"|"disconnected"|"reconnecting") => void;
@@ -149,7 +149,7 @@ const DEFAULT_H = 1668;
 export default function Canvas({
   color, brushSize, opacity, eraser, brushType, panMode, username,
   bgColor, canvasSize, layers, activeLayerId,
-  setUsers, onReady, onBgColor, onCanvasSizeFromServer, onStrokeAdded, onStrokeFinished, onLayerEvent,
+  setUsers, onReady, onBgColor, onCanvasSizeFromServer, onUndoStateChange, onStrokeFinished, onLayerEvent,
   onConnectionChange,
 }: Props) {
   const canvasRef         = useRef<HTMLCanvasElement>(null);
@@ -160,7 +160,6 @@ export default function Canvas({
   const wsRef             = useRef<WebSocket | null>(null);
   const cursorsRef        = useRef<Map<string, Cursor>>(new Map());
   const strokesRef        = useRef<Stroke[]>([]);
-  const myStrokesRef      = useRef<Stroke[]>([]);
   const currentStrokeRef  = useRef<Stroke | null>(null);
   const rafRef            = useRef<number | null>(null);
   const imagesRef         = useRef<CanvasImage[]>([]);
@@ -197,7 +196,7 @@ export default function Canvas({
   } | null>(null);
   const pendingDrawTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const onStrokeAddedRef       = useRef(onStrokeAdded);
+  const onUndoStateChangeRef   = useRef(onUndoStateChange);
   const onStrokeFinishedRef    = useRef(onStrokeFinished);
   const onLayerEventRef        = useRef(onLayerEvent);
   const onConnectionChangeRef  = useRef(onConnectionChange);
@@ -207,7 +206,7 @@ export default function Canvas({
   eraserRef.current = eraser; brushTypeRef.current = brushType; panModeRef.current = panMode;
   bgColorRef.current = bgColor; canvasSizeRef.current = canvasSize;
   layersRef.current = layers; activeLayerRef.current = activeLayerId;
-  onStrokeAddedRef.current = onStrokeAdded; onStrokeFinishedRef.current = onStrokeFinished;
+  onUndoStateChangeRef.current = onUndoStateChange; onStrokeFinishedRef.current = onStrokeFinished;
   onLayerEventRef.current = onLayerEvent; onConnectionChangeRef.current = onConnectionChange;
   onCanvasSizeFromServerRef.current = onCanvasSizeFromServer;
 
@@ -501,22 +500,16 @@ export default function Canvas({
         // el default local de App.tsx sin tocar nada.
         if (data.canvasSize) onCanvasSizeFromServerRef.current?.(data.canvasSize);
         if (data.myUserId) myUserIdRef.current = data.myUserId;
-        // ── FIX RAÍZ (undo borra TODO en vez de un solo trazo) ────────────
-        // myStrokesRef.current se inicializaba vacío y SOLO se llenaba con
-        // trazos dibujados en la sesión actual del navegador (en
-        // finishStroke). Nunca se rellenaba con los strokes propios que
-        // llegan en el init (desde la DB / RAM del server tras un refresh
-        // o reconexión). Resultado: si refrescabas y dibujabas un trazo
-        // nuevo, myStrokesRef solo tenía ESE trazo. Al hacer undo, el
-        // snapshot guardado era "todos mis strokes menos el último" =
-        // array vacío, así que el undo borraba absolutamente todo lo que
-        // tenías (incluyendo trazos de antes del refresh), no solo el
-        // último trazo. Ahora myStrokesRef.current se sincroniza con los
-        // strokes que ya pertenecen a este userId apenas llega el init.
+        // REDISEÑO undo/redo autoritativo: el servidor nos dice en el init
+        // cuántas acciones de redo tenemos disponibles (redoAvailable). El
+        // "puedo deshacer" se deriva de si ya tenemos algún stroke propio en
+        // strokesRef.current — si hay al menos uno, hay algo que deshacer.
         if (data.myUserId) {
-          myStrokesRef.current = strokesRef.current.filter(
-            (s: any) => s._uid === data.myUserId
-          );
+          const hasOwnStrokes = strokesRef.current.some((s: any) => s._uid === data.myUserId);
+          onUndoStateChangeRef.current?.({
+            canUndo: hasOwnStrokes,
+            canRedo: (data.redoAvailable || 0) > 0,
+          });
         }
         onLayerEventRef.current?.({ type:"init_layers", layers: data.layers||[], myUserId: data.myUserId });
 
@@ -574,31 +567,38 @@ export default function Canvas({
         strokesRef.current=(data.strokes||[]).map((s: Stroke) => s._sid ? s : {...s, _sid: genSid()});
         redrawFull(); return;
       }
-      if(data.type==="undo_sync_remote"){
-        console.log("🔍 [DEBUG] undo_sync_remote recibido:", {
-          userId: data.userId,
-          strokesCount: (data.strokes || []).length,
-          myLayersKnown: layersRef.current.map(l => l.id),
-          layerIdsInIncoming: [...new Set((data.strokes||[]).map((s:any)=>s.layerId))],
-        });
-        const uid = data.userId;
-        const mine = (data.strokes || []).map((s: any) => ({...s, _uid: uid, _sid: s._sid || genSid()}));
-        strokesRef.current = [...strokesRef.current.filter((s: any) => s._uid !== uid), ...mine];
-        // FIX (undo remoto no se refleja sin refrescar): rebuildAllLayers ya
-        // considera los layerId presentes en strokesRef.current (ver fix
-        // arriba), pero requestFrame() tiene un guard (rafRef.current!==null)
-        // que puede ignorar la solicitud si hay una condición de carrera con
-        // un frame que está terminando justo en ese instante. En ese caso el
-        // canvas interno se actualiza correctamente pero la pantalla nunca
-        // se repinta — visualmente parece "atascado" hasta el próximo evento
-        // que sí logre pedir un frame (como refrescar la página).
-        // Forzamos rafRef.current = null para garantizar que requestFrame()
-        // SIEMPRE encole un nuevo frame después de un undo remoto, sin
-        // importar el estado de cualquier frame en vuelo.
+      // REDISEÑO undo/redo autoritativo: el servidor manda exactamente qué
+      // stroke quitar/restaurar (identificado por _sid), en vez de mandar
+      // "todos mis strokes restantes". Esto es simple, ligero, e imposible
+      // de desincronizar — no hay cálculo de "others vs mine" en el cliente.
+      if(data.type==="stroke_removed"){
+        strokesRef.current = strokesRef.current.filter((s: any) => s._sid !== data.sid);
+        // Forzamos rafRef.current=null para garantizar que requestFrame()
+        // SIEMPRE encole un nuevo frame, evitando la condición de carrera
+        // con un frame en vuelo que dejaba la pantalla "atascada" sin
+        // repintar hasta que ocurriera otro evento (como refrescar).
         rebuildAllLayers();
         rafRef.current = null;
         requestFrame();
-        console.log("🔍 [DEBUG] después de forzar repaint, strokesRef.current.length:", strokesRef.current.length);
+        if (data.userId === myUserIdRef.current) {
+          const hasOwnStrokes = strokesRef.current.some((s: any) => s._uid === myUserIdRef.current);
+          onUndoStateChangeRef.current?.({ canUndo: hasOwnStrokes, canRedo: true });
+        }
+        return;
+      }
+      if(data.type==="stroke_restored"){
+        const s = { ...data.stroke, _sid: data.stroke._sid || genSid() };
+        strokesRef.current.push(s);
+        rebuildAllLayers();
+        rafRef.current = null;
+        requestFrame();
+        return;
+      }
+      if(data.type==="undo_state"){
+        if (data.userId === myUserIdRef.current) {
+          const hasOwnStrokes = strokesRef.current.some((s: any) => s._uid === myUserIdRef.current);
+          onUndoStateChangeRef.current?.({ canUndo: hasOwnStrokes, canRedo: (data.redoAvailable || 0) > 0 });
+        }
         return;
       }
       if(data.type==="layer_added"){ onLayerEventRef.current?.(data); getLayerCanvas(data.layer.id); requestFrame(); return; }
@@ -795,35 +795,16 @@ export default function Canvas({
       currentStrokeRef.current=null;
       const markedStroke = {...stroke, _uid: myUserIdRef.current};
       strokesRef.current.push(markedStroke);
-      myStrokesRef.current=[...myStrokesRef.current,markedStroke];
       drawStroke(getLayerCtx(stroke.layerId??-1),stroke);
       if(wsRef.current?.readyState===WebSocket.OPEN) wsRef.current.send(JSON.stringify({type:"stroke",stroke}));
       if(!stroke.eraser)onStrokeFinishedRef.current?.(stroke.color);
-
-      const getMyStrokes=()=>myStrokesRef.current;
-      // FIX CLAVE: comparar por _sid (id único) en vez de includes() por referencia
-      const setMyStrokes=(newMine:Stroke[])=>{
-        const uid = myUserIdRef.current;
-        const marked = newMine.map(s => ({...s, _uid: uid, _sid: s._sid || genSid()}));
-        // "others" = strokes que NO son del usuario actual (sin importar referencia)
-        const others = strokesRef.current.filter((s:any) => s._uid !== uid);
-        myStrokesRef.current = marked;
-        strokesRef.current = [...others, ...marked];
-        const myLayerIds = new Set(marked.map((s:any) => s.layerId ?? -1));
-        myLayerIds.forEach(id => rebuildLayerCanvas(id));
-        // Reconstruir TODAS mis capas afectadas anteriormente también (seguridad ante undo que vacía una capa)
-        layersRef.current.forEach(l => { if (l.ownerId === uid) rebuildLayerCanvas(l.id); });
-        requestFrame();
-        console.log("🔍 [DEBUG-SEND] enviando undo_sync:", {
-          myUserId: uid,
-          markedCount: marked.length,
-          layerIdsInMarked: [...new Set(marked.map((s:any)=>s.layerId))],
-        });
-        // FIX: sendReliable reintenta automáticamente si el WS no está
-        // abierto en este instante exacto, en vez de descartar el mensaje.
-        sendReliable(() => wsRef.current, {type:"undo_sync", strokes: marked});
-      };
-      onStrokeAddedRef.current?.(getMyStrokes,setMyStrokes);
+      // REDISEÑO undo/redo: ya no calculamos snapshots locales aquí. El
+      // servidor es la única fuente de verdad — dibujar un trazo nuevo
+      // simplemente invalida su redo stack server-side automáticamente
+      // (ver handler "stroke" en index.ts). El cliente solo necesita saber
+      // que ahora SÍ puede deshacer algo, lo cual se refleja al tener al
+      // menos un stroke propio en strokesRef.current.
+      onUndoStateChangeRef.current?.({ canUndo: true, canRedo: false });
       requestFrame();
     };
 
@@ -991,6 +972,15 @@ export default function Canvas({
   };
   (Canvas as any)._sendWS = (msg: object) => {
     if(wsRef.current?.readyState===WebSocket.OPEN) wsRef.current.send(JSON.stringify(msg));
+  };
+  // REDISEÑO undo/redo autoritativo: el cliente solo pide la acción, sin
+  // calcular ni mandar ningún dato. sendReliable garantiza que el mensaje
+  // llegue incluso si el WS está momentáneamente reconectando.
+  (Canvas as any)._sendUndo = () => {
+    sendReliable(() => wsRef.current, { type: "undo" });
+  };
+  (Canvas as any)._sendRedo = () => {
+    sendReliable(() => wsRef.current, { type: "redo" });
   };
 
   return (

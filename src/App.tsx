@@ -14,7 +14,6 @@ type Stroke = {
   eraser: boolean; brushType?: BrushType; layerId?: number;
 };
 
-const MAX_HISTORY       = 50;
 const MAX_COLOR_HISTORY = 8;
 // FIX (undo "deshace 3-4 líneas de golpe"): tiempo mínimo entre ejecuciones
 // reales de undo/redo. El botón, el atajo de teclado y el gesto táctil
@@ -72,15 +71,18 @@ function App() {
     localStorage.setItem("drawbot-shortcuts", JSON.stringify(next));
   };
 
-  // ── Undo / Redo ──────────────────────────────────────────────────────────
-  const undoStackRef = useRef<Stroke[][]>([]);
-  const redoStackRef = useRef<Stroke[][]>([]);
-  const [undoLen, setUndoLen] = useState(0);
-  const [redoLen, setRedoLen] = useState(0);
-  const canvasApiRef = useRef<{ getMyStrokes: () => Stroke[]; setMyStrokes: (s: Stroke[]) => void } | null>(null);
+  // ── REDISEÑO undo/redo: autoritativo en el servidor ─────────────────────
+  // Ya no hay undoStackRef/redoStackRef ni snapshots locales. El cliente
+  // solo mantiene un booleano "puedo deshacer / puedo rehacer" que el
+  // servidor le confirma en cada evento. Deshacer/rehacer es simplemente
+  // "pedirle al servidor que lo haga" — sin cálculos, sin posibilidad de
+  // desincronización entre lo que cree el cliente y lo que pasó realmente.
+  const [canUndo, setCanUndo] = useState(false);
+  const [canRedo, setCanRedo] = useState(false);
 
-  // FIX: timestamp del último undo/redo realmente ejecutado, para descartar
-  // disparos duplicados que lleguen dentro de la ventana de debounce.
+  // Debounce: evita que el botón, el atajo de teclado, y el gesto táctil
+  // disparen la misma acción más de una vez en una ventana muy corta de
+  // tiempo (p.ej. un click que también dispara el listener de teclado).
   const lastUndoActionRef = useRef(0);
 
   const setColor = useCallback((c: string) => setColorRaw(c), []);
@@ -115,46 +117,30 @@ function App() {
     });
   }, []);
 
-  const onStrokeAdded = useCallback((get: () => Stroke[], set: (s: Stroke[]) => void) => {
-    canvasApiRef.current = { getMyStrokes: get, setMyStrokes: set };
-    const snap = get().slice(0, -1);
-    undoStackRef.current = [...undoStackRef.current.slice(-MAX_HISTORY), snap];
-    redoStackRef.current = [];
-    setUndoLen(undoStackRef.current.length);
-    setRedoLen(0);
+  // Canvas nos avisa cuando el servidor confirma un cambio en el estado de
+  // undo/redo disponible (al dibujar, al recibir init, o tras un undo/redo
+  // de cualquier usuario en la sala que afecte a este usuario).
+  const handleUndoStateChange = useCallback((state: { canUndo: boolean; canRedo: boolean }) => {
+    setCanUndo(state.canUndo);
+    setCanRedo(state.canRedo);
   }, []);
 
   const handleUndo = useCallback(() => {
-    // FIX: ignora disparos repetidos que lleguen demasiado rápido seguidos
-    // (mismo gesto detectado por más de un listener, doble-click accidental, etc.)
+    // Ignora disparos repetidos que lleguen demasiado rápido seguidos
+    // (mismo gesto detectado por más de un listener, doble-click accidental).
     const now = performance.now();
     if (now - lastUndoActionRef.current < UNDO_DEBOUNCE_MS) return;
     lastUndoActionRef.current = now;
-
-    const api = canvasApiRef.current;
-    if (!api || !undoStackRef.current.length) return;
-    redoStackRef.current = [...redoStackRef.current, [...api.getMyStrokes()]];
-    const snap = undoStackRef.current.pop()!;
-    api.setMyStrokes(snap);
-    setUndoLen(undoStackRef.current.length);
-    setRedoLen(redoStackRef.current.length);
+    // Solo le pedimos al servidor que deshaga — él decide qué stroke quitar
+    // y le avisa a TODOS (incluido este navegador) cuando ya pasó.
+    (Canvas as any)._sendUndo?.();
   }, []);
 
   const handleRedo = useCallback(() => {
-    // Mismo debounce que handleUndo — comparten la ventana de tiempo para
-    // que un undo seguido inmediatamente de un redo (u otro patrón mixto)
-    // no se trate como "rebote" del mismo gesto.
     const now = performance.now();
     if (now - lastUndoActionRef.current < UNDO_DEBOUNCE_MS) return;
     lastUndoActionRef.current = now;
-
-    const api = canvasApiRef.current;
-    if (!api || !redoStackRef.current.length) return;
-    undoStackRef.current = [...undoStackRef.current, [...api.getMyStrokes()]];
-    const snap = redoStackRef.current.pop()!;
-    api.setMyStrokes(snap);
-    setUndoLen(undoStackRef.current.length);
-    setRedoLen(redoStackRef.current.length);
+    (Canvas as any)._sendRedo?.();
   }, []);
 
   // Refs siempre frescos — evitan re-crear listeners en cada render
@@ -225,13 +211,10 @@ function App() {
     const myIdx = myLayers.findIndex(l => l.id === topId);
     if (myIdx <= 0) return;
     const bottom = myLayers[myIdx - 1], top = myLayers[myIdx];
-    const snapBefore = layers.map(l => ({ ...l }));
     (Canvas as any)._mergeLayers?.(bottom.id, top.id);
     const updated = layers.filter(l => l.id !== top.id);
     pushLayerUpdate(updated);
     if (activeLayerId === topId) setActiveLayerId(bottom.id);
-    undoStackRef.current = [...undoStackRef.current.slice(-MAX_HISTORY), snapBefore as any];
-    setUndoLen(undoStackRef.current.length);
   }, [myLayers, layers, activeLayerId, pushLayerUpdate]);
 
   const handleBlendMode = useCallback((id: number, blendMode: string) => {
@@ -360,7 +343,7 @@ function App() {
         colorHistory={colorHistory}
         shortcuts={shortcuts} setShortcuts={setShortcuts}
         onUndo={handleUndo} onRedo={handleRedo}
-        canUndo={undoLen > 0} canRedo={redoLen > 0}
+        canUndo={canUndo} canRedo={canRedo}
         bgColor={bgColor}
         setBgColor={(c: string) => { setBgColor(c); (Canvas as any)._sendBgColor?.(c); }}
         savePNG={savePNG}
@@ -387,7 +370,7 @@ function App() {
         onReady={(fn) => setSavePNG(() => fn)}
         onBgColor={(c) => setBgColor(c)}
         onCanvasSizeFromServer={handleCanvasSizeFromServer}
-        onStrokeAdded={onStrokeAdded}
+        onUndoStateChange={handleUndoStateChange}
         onStrokeFinished={onStrokeFinished}
         onLayerEvent={handleLayerEvent}
         onConnectionChange={setConnStatus}

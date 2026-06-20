@@ -57,6 +57,26 @@ const wss = new WebSocketServer({ server: httpServer });
 
 const rooms        = new Map<string, Set<WebSocket>>();
 const roomStrokes  = new Map<string, Stroke[]>();
+// ── REDISEÑO undo/redo autoritativo en servidor ────────────────────────────
+// Antes: cada cliente calculaba localmente "mis strokes restantes" y se lo
+// mandaba al servidor (undo_sync). Esto requería que cada navegador tuviera
+// una copia 100% correcta y sincronizada de su propio historial — y romperse
+// con cualquier refresh, reconexión, o timing de React (vimos esto fallar de
+// 3 formas distintas). Ahora el servidor es la única fuente de verdad:
+// - undoHistory[roomId][userId] = array de strokes que ESTE usuario deshizo,
+//   en orden (el último elemento es el próximo que se restaura con redo).
+// - El cliente solo pide "undo"/"redo" sin mandar datos; el servidor decide
+//   qué stroke mover y hace broadcast del resultado a TODOS los presentes,
+//   incluyendo al que pidió la acción. Así nunca hay desincronización: todos
+//   ven exactamente el mismo evento al mismo tiempo.
+const undoHistory = new Map<string, Map<string, Stroke[]>>(); // roomId -> userId -> stack de strokes deshechos
+
+function getUndoStack(roomId: string, userId: string): Stroke[] {
+  if (!undoHistory.has(roomId)) undoHistory.set(roomId, new Map());
+  const roomMap = undoHistory.get(roomId)!;
+  if (!roomMap.has(userId)) roomMap.set(userId, []);
+  return roomMap.get(userId)!;
+}
 const roomUsers    = new Map<string, Map<string, string>>();
 const roomBgColor  = new Map<string, string>();
 // FIX (tamaño de lienzo vuelve a default al refrescar): el canvasSize nunca
@@ -243,6 +263,7 @@ wss.on("connection", (ws: WebSocket) => {
         canvasSize: roomCanvasSize.get(roomId) || null,
         layers:   roomLayers.get(roomId)  || [],
         myUserId: userId,
+        redoAvailable: getUndoStack(roomId, userId).length,
       }));
 
       const users = Array.from(roomUsers.get(roomId)!.values());
@@ -277,8 +298,12 @@ wss.on("connection", (ws: WebSocket) => {
         const keep = Math.floor(MAX_STROKES * 0.8);
         roomStrokes.set(roomId, list.slice(list.length - keep));
       }
+      // Dibujar un trazo nuevo invalida el redo stack, igual que en
+      // cualquier editor de texto/dibujo estándar.
+      getUndoStack(roomId, userId).length = 0;
       saveStroke(roomId, stroke); // fire-and-forget
       broadcast(roomId, ws, { type: "stroke", stroke: data.stroke, userId });
+      ws.send(JSON.stringify({ type: "undo_state", userId, redoAvailable: 0 }));
       return;
     }
 
@@ -329,14 +354,51 @@ wss.on("connection", (ws: WebSocket) => {
       return;
     }
 
-    if (data.type === "undo_sync") {
-      const list   = roomStrokes.get(roomId) || [];
-      const others = list.filter((s: any) => s._uid !== userId);
-      const mine   = (data.strokes || []).map((s: any) => ({ ...s, _uid: userId }));
-      roomStrokes.set(roomId, [...others, ...mine]);
-      const affectedLayers = [...new Set(mine.map((s: any) => s.layerId).filter((v: any) => v != null))];
-      syncUndoStrokes(roomId, userId, mine); // fire-and-forget
-      broadcast(roomId, ws, { type: "undo_sync_remote", strokes: mine, userId, affectedLayers });
+    // ── undo/redo autoritativo: el cliente solo pide la acción, sin datos.
+    // El servidor decide qué stroke mover y hace broadcast a TODOS
+    // (incluido quien pidió la acción), garantizando que nunca haya
+    // desincronización entre lo que ve cada usuario.
+    if (data.type === "undo") {
+      const list = roomStrokes.get(roomId) || [];
+      // Buscar el último stroke de este usuario (el más reciente al final)
+      let lastIdx = -1;
+      for (let i = list.length - 1; i >= 0; i--) {
+        if ((list[i] as any)._uid === userId) { lastIdx = i; break; }
+      }
+      if (lastIdx === -1) return; // no hay nada que deshacer para este usuario
+
+      const [removed] = list.splice(lastIdx, 1);
+      if (!removed) return; // nunca debería pasar (lastIdx ya validado), guard para TypeScript
+      roomStrokes.set(roomId, list);
+
+      const undoStack = getUndoStack(roomId, userId);
+      undoStack.push(removed);
+
+      if (supabase && removed._sid) {
+        supabase.from("strokes").delete().eq("room_id", roomId).eq("sid", removed._sid).then();
+      }
+
+      const layerId = (removed as any).layerId;
+      // Broadcast a TODOS, incluido el emisor: así no hay "mi pantalla ya
+      // cambió, la del resto no" — todos reciben el mismo evento.
+      broadcastAll(roomId, { type: "stroke_removed", sid: removed._sid, userId, layerId });
+      ws.send(JSON.stringify({ type: "undo_state", userId, redoAvailable: undoStack.length }));
+      return;
+    }
+
+    if (data.type === "redo") {
+      const undoStack = getUndoStack(roomId, userId);
+      const restored = undoStack.pop();
+      if (!restored) return; // no hay nada que rehacer
+
+      const list = roomStrokes.get(roomId) || [];
+      list.push(restored);
+      roomStrokes.set(roomId, list);
+      saveStroke(roomId, restored); // fire-and-forget, vuelve a guardarse en DB
+
+      // Igual que undo: todos reciben el mismo stroke restaurado al mismo tiempo.
+      broadcastAll(roomId, { type: "stroke_restored", stroke: restored, userId });
+      ws.send(JSON.stringify({ type: "undo_state", userId, redoAvailable: undoStack.length }));
       return;
     }
 
