@@ -70,10 +70,19 @@ function OpacitySlider({ layerId, initialOpacity, onLive, onCommit }: {
 }) {
   const valRef  = useRef(Math.round(initialOpacity * 100));
   const trackRef = useRef<HTMLDivElement>(null);
+  // FIX (slider no fluido): cachear el rect del track aquí, calculado UNA
+  // sola vez al iniciar el arrastre (pointerdown), en vez de llamar
+  // getBoundingClientRect() en cada pixel de movimiento del mouse/dedo.
+  // getBoundingClientRect fuerza un layout reflow del navegador — barato
+  // una vez, pero notablemente costoso si se repite decenas de veces por
+  // segundo durante un arrastre, especialmente dentro de un panel con
+  // scroll y muchos elementos como el de capas. El track no se mueve
+  // mientras se arrastra, así que cachearlo es seguro.
+  const cachedRectRef = useRef<{ top: number; height: number } | null>(null);
   const [display, setDisplay] = useState(Math.round(initialOpacity * 100));
 
   const calc = useCallback((clientY: number) => {
-    const rect = trackRef.current?.getBoundingClientRect();
+    const rect = cachedRectRef.current;
     if (!rect) return;
     const pct  = 1 - Math.max(0, Math.min(1, (clientY - rect.top) / rect.height));
     const val  = Math.round(pct * 100);
@@ -99,15 +108,38 @@ function OpacitySlider({ layerId, initialOpacity, onLive, onCommit }: {
   const handlePointer = useCallback((e: React.PointerEvent) => {
     const el = e.currentTarget as HTMLDivElement; // referencia real al nodo DOM, estable
     el.setPointerCapture(e.pointerId);
+
+    // FIX (slider no fluido): calcular el rect UNA vez aquí, al iniciar el
+    // arrastre — no en cada movimiento.
+    const rect = el.getBoundingClientRect();
+    cachedRectRef.current = { top: rect.top, height: rect.height };
     calc(e.clientY);
 
-    const onMove = (ev: PointerEvent) => calc(ev.clientY);
-    const onUp   = (ev: PointerEvent) => {
+    // FIX (slider no fluido, parte 2): los eventos pointermove pueden
+    // disparar mucho más rápido que la tasa de refresco real de la
+    // pantalla (hasta cientos de veces por segundo en algunos touchpads/
+    // mouses de alta frecuencia). Procesar cada uno individualmente
+    // saturaba el hilo principal con trabajo redundante. rafPendingRef
+    // asegura que solo se procese el movimiento más reciente una vez por
+    // frame de animación, que es la cadencia natural de la pantalla.
+    let rafPending = false;
+    let lastClientY = e.clientY;
+    const onMove = (ev: PointerEvent) => {
+      lastClientY = ev.clientY;
+      if (rafPending) return;
+      rafPending = true;
+      requestAnimationFrame(() => {
+        rafPending = false;
+        calc(lastClientY);
+      });
+    };
+    const onUp = (ev: PointerEvent) => {
       // FIX: usar la variable `el` capturada arriba, nunca e.currentTarget
       // dentro de este closure — el evento React original ya no es válido.
       try { el.releasePointerCapture(ev.pointerId); } catch {}
       el.removeEventListener("pointermove", onMove);
       el.removeEventListener("pointerup",   onUp);
+      cachedRectRef.current = null;
       onCommit(layerId, valRef.current / 100); // propagar a React + WS al soltar
     };
     el.addEventListener("pointermove", onMove);
