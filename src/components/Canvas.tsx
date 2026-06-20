@@ -501,6 +501,23 @@ export default function Canvas({
         // el default local de App.tsx sin tocar nada.
         if (data.canvasSize) onCanvasSizeFromServerRef.current?.(data.canvasSize);
         if (data.myUserId) myUserIdRef.current = data.myUserId;
+        // ── FIX RAÍZ (undo borra TODO en vez de un solo trazo) ────────────
+        // myStrokesRef.current se inicializaba vacío y SOLO se llenaba con
+        // trazos dibujados en la sesión actual del navegador (en
+        // finishStroke). Nunca se rellenaba con los strokes propios que
+        // llegan en el init (desde la DB / RAM del server tras un refresh
+        // o reconexión). Resultado: si refrescabas y dibujabas un trazo
+        // nuevo, myStrokesRef solo tenía ESE trazo. Al hacer undo, el
+        // snapshot guardado era "todos mis strokes menos el último" =
+        // array vacío, así que el undo borraba absolutamente todo lo que
+        // tenías (incluyendo trazos de antes del refresh), no solo el
+        // último trazo. Ahora myStrokesRef.current se sincroniza con los
+        // strokes que ya pertenecen a este userId apenas llega el init.
+        if (data.myUserId) {
+          myStrokesRef.current = strokesRef.current.filter(
+            (s: any) => s._uid === data.myUserId
+          );
+        }
         onLayerEventRef.current?.({ type:"init_layers", layers: data.layers||[], myUserId: data.myUserId });
 
         // ── FIX CLAVE (bug de "se pierde todo al refrescar") ──────────────
@@ -797,6 +814,11 @@ export default function Canvas({
         // Reconstruir TODAS mis capas afectadas anteriormente también (seguridad ante undo que vacía una capa)
         layersRef.current.forEach(l => { if (l.ownerId === uid) rebuildLayerCanvas(l.id); });
         requestFrame();
+        console.log("🔍 [DEBUG-SEND] enviando undo_sync:", {
+          myUserId: uid,
+          markedCount: marked.length,
+          layerIdsInMarked: [...new Set(marked.map((s:any)=>s.layerId))],
+        });
         // FIX: sendReliable reintenta automáticamente si el WS no está
         // abierto en este instante exacto, en vez de descartar el mensaje.
         sendReliable(() => wsRef.current, {type:"undo_sync", strokes: marked});
