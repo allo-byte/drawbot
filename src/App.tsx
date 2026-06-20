@@ -8,12 +8,6 @@ import LayerPanel from "./components/LayerPanel";
 import ProfilePanel, { getStoredProfile, saveProfile } from "./components/ProfilePanel";
 import type { Profile } from "./components/ProfilePanel";
 
-type Stroke = {
-  points: {x:number;y:number}[];
-  color: string; size: number; opacity: number;
-  eraser: boolean; brushType?: BrushType; layerId?: number;
-};
-
 const MAX_COLOR_HISTORY = 8;
 // FIX (undo "deshace 3-4 líneas de golpe"): tiempo mínimo entre ejecuciones
 // reales de undo/redo. El botón, el atajo de teclado y el gesto táctil
