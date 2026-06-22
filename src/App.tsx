@@ -141,6 +141,11 @@ function App() {
   const handleUndoRef = useRef(handleUndo);
   const handleRedoRef = useRef(handleRedo);
   const savePNGRef    = useRef(savePNG);
+  // handleFlipHorizontal se define más abajo en el archivo (depende del
+  // componente Canvas montado); el ref se declara aquí para que el
+  // useEffect de atajos de teclado pueda usarlo, y se actualiza con el
+  // valor real justo después de que la función exista.
+  const handleFlipRef = useRef<() => void>(() => {});
   handleUndoRef.current = handleUndo;
   handleRedoRef.current = handleRedo;
   savePNGRef.current    = savePNG;
@@ -163,6 +168,7 @@ function App() {
       if (match(e, shortcuts.save))   { e.preventDefault(); savePNGRef.current(); }
       if (match(e, shortcuts.eraser)) { setEraser(v => !v); setPanMode(false); }
       if (match(e, shortcuts.pan))    { setPanMode(v => !v); setEraser(false); }
+      if (match(e, shortcuts.flip))   { e.preventDefault(); handleFlipRef.current(); }
     };
     window.addEventListener("keydown", h);
     return () => window.removeEventListener("keydown", h);
@@ -332,6 +338,10 @@ function App() {
     const nowFlipped = (Canvas as any)._toggleFlipX?.();
     setFlippedX(!!nowFlipped);
   }, []);
+  // Mantener el ref fresco en cada render para que el atajo de teclado
+  // (cuyo listener vive en un useEffect con dependencias distintas)
+  // siempre llame a la versión más reciente de esta función.
+  handleFlipRef.current = handleFlipHorizontal;
 
   // El gesto de 4 dedos (detectado dentro de Canvas) dispara este evento
   // para que App.tsx mantenga sincronizado el estado visual del botón.

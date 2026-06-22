@@ -12,6 +12,7 @@ export type Shortcuts = {
   eraser: string;
   pan: string;
   save: string;
+  flip: string;
 };
 
 export const DEFAULT_SHORTCUTS: Shortcuts = {
@@ -20,6 +21,7 @@ export const DEFAULT_SHORTCUTS: Shortcuts = {
   eraser: "e",
   pan:    "h",
   save:   "ctrl+s",
+  flip:   "shift+h",
 };
 
 type Props = {
@@ -299,6 +301,7 @@ export default function Toolbar({
     eraser: "Borrador",
     pan:    "Mano/Pan",
     save:   "Guardar PNG",
+    flip:   "Voltear lienzo",
   };
 
   return (
@@ -484,7 +487,7 @@ export default function Toolbar({
             una acción de vista instantánea, no requiere abrir un panel */}
         <div className={`tb-btn${flippedX ? " active" : ""}`}
           onClick={onFlipHorizontal}
-          title="Voltear lienzo (solo tu vista)" style={{ fontSize:15 }}>
+          title={`Voltear lienzo, solo tu vista (${fmtShortcut(shortcuts.flip)})`} style={{ fontSize:15 }}>
           {TOOL_ICONS.flip}
         </div>
 
