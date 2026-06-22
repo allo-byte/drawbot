@@ -461,6 +461,17 @@ export default function Canvas({
     if (cpos && crosshairRef.current.enabled && currentStrokeRef.current) {
       const { shape, size } = crosshairRef.current;
       ctx.save();
+      // FIX (crosshair desplazado en iPad/táctil): el ctx.restore() de
+      // arriba solo deshace el ctx.save() del inicio de compositeNow, que
+      // tenía ctx.scale(dpr,dpr) aplicado — el contexto sigue escalado por
+      // el devicePixelRatio en este punto. cpos está en píxeles CSS
+      // (de getBoundingClientRect, sin dpr), así que dibujarlo aquí sin
+      // resetear la transformación lo multiplica por dpr y lo desplaza
+      // — más notorio en iPad, donde dpr suele ser 2 o 3.
+      // setTransform(1,0,0,1,0,0) limpia CUALQUIER transformación previa
+      // (scale, translate) y deja el contexto en coordenadas de pantalla
+      // puras 1:1, que es exactamente lo que cpos espera.
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.strokeStyle = "rgba(255,255,255,0.85)";
       ctx.fillStyle = "rgba(255,255,255,0.85)";
       ctx.lineWidth = 1.5;
