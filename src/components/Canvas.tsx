@@ -180,6 +180,17 @@ export default function Canvas({
   const lastSentPtRef  = useRef(0);
   const lastSentMsRef  = useRef(0);
   const viewRef        = useRef({ x:0, y:0, scale:1 });
+  // FEATURE: voltear lienzo — solo afecta la VISTA local de este usuario
+  // (como un espejo para dibujar mejor), nunca se manda por WS ni se
+  // persiste. Los strokes siguen guardándose con sus coordenadas reales
+  // sin invertir; solo la transformación de render se invierte en X.
+  const flipXRef        = useRef(false);
+  // FEATURE: crosshair configurable (forma + tamaño) que sigue el dedo en
+  // dispositivos táctiles, donde el cursor CSS "crosshair" no existe.
+  const crosshairRef    = useRef<{ shape: "circle"|"cross"|"dot"; size: number; enabled: boolean }>({
+    shape: "circle", size: 24, enabled: true,
+  });
+  const crosshairPosRef = useRef<{x:number;y:number} | null>(null);
   const touchPtrsRef   = useRef<Map<number,{x:number;y:number}>>(new Map());
 
   // ── FIX gestos: estado de gesto más robusto ─────────────────────────────
@@ -221,7 +232,14 @@ export default function Canvas({
 
   const toWorld = (sx:number, sy:number) => {
     const v = viewRef.current;
-    return { x:(sx-v.x)/v.scale, y:(sy-v.y)/v.scale };
+    // FEATURE (voltear lienzo): si flipXRef está activo, la pantalla se
+    // dibuja espejada en compositeNow. Invertimos sx respecto al ancho
+    // visible del canvas ANTES de aplicar la transformación de vista
+    // normal, así el punto resultante en coordenadas del lienzo es
+    // correcto sin tocar cómo se guardan/envían los strokes.
+    const canvas = canvasRef.current;
+    const effSx = (flipXRef.current && canvas) ? canvas.clientWidth - sx : sx;
+    return { x:(effSx-v.x)/v.scale, y:(sy-v.y)/v.scale };
   };
 
   const offW = () => canvasSizeRef.current?.w ?? DEFAULT_W;
@@ -378,7 +396,16 @@ export default function Canvas({
     const ctx = canvas.getContext("2d")!;
     const dpr = window.devicePixelRatio || 1, v = viewRef.current;
     ctx.setTransform(1,0,0,1,0,0); ctx.fillStyle = "#1a1a1a"; ctx.fillRect(0,0,canvas.width,canvas.height);
-    ctx.save(); ctx.scale(dpr,dpr); ctx.translate(v.x,v.y); ctx.scale(v.scale,v.scale);
+    ctx.save(); ctx.scale(dpr,dpr);
+    // FEATURE (voltear lienzo, vista local): refleja todo el contenido
+    // horizontalmente respecto al centro del canvas visible. Puramente
+    // visual — no afecta cómo se guardan los strokes ni se sincroniza
+    // con otros usuarios (cada uno puede tener su propio flip activo).
+    if (flipXRef.current) {
+      ctx.translate(canvas.clientWidth, 0);
+      ctx.scale(-1, 1);
+    }
+    ctx.translate(v.x,v.y); ctx.scale(v.scale,v.scale);
     const cs = canvasSizeRef.current;
     const drawContent = (c: CanvasRenderingContext2D) => {
       c.fillStyle = bgColorRef.current; c.fillRect(0,0, offW(), offH());
@@ -409,9 +436,51 @@ export default function Canvas({
       ctx.beginPath(); ctx.fillStyle="#00ff88";
       ctx.arc(cursor.x,cursor.y,6/v.scale,0,Math.PI*2); ctx.fill();
       ctx.fillStyle="white"; ctx.font=`${12/v.scale}px Arial`;
-      ctx.fillText(cursor.userId, cursor.x+10/v.scale, cursor.y-10/v.scale);
+      // FEATURE (voltear lienzo): si la vista está espejada, el texto del
+      // nombre quedaría ilegible salvo que lo contrarrestemos con un flip
+      // local propio justo para el texto.
+      if (flipXRef.current) {
+        ctx.save();
+        ctx.translate(cursor.x + 10/v.scale, cursor.y - 10/v.scale);
+        ctx.scale(-1, 1);
+        ctx.fillText(cursor.userId, 0, 0);
+        ctx.restore();
+      } else {
+        ctx.fillText(cursor.userId, cursor.x+10/v.scale, cursor.y-10/v.scale);
+      }
     });
     ctx.restore();
+
+    // FEATURE: crosshair táctil — se dibuja DESPUÉS del ctx.restore(), en
+    // coordenadas de pantalla puras (no de mundo), porque su tamaño debe
+    // ser constante en pixeles visibles sin importar el zoom/pan/flip
+    // actual del lienzo. Solo se muestra mientras hay un dedo activo
+    // dibujando (currentStrokeRef.current existe) y el dispositivo es
+    // táctil — en mouse/pen ya existe el cursor CSS "crosshair" nativo.
+    const cpos = crosshairPosRef.current;
+    if (cpos && crosshairRef.current.enabled && currentStrokeRef.current) {
+      const { shape, size } = crosshairRef.current;
+      ctx.save();
+      ctx.strokeStyle = "rgba(255,255,255,0.85)";
+      ctx.fillStyle = "rgba(255,255,255,0.85)";
+      ctx.lineWidth = 1.5;
+      if (shape === "circle") {
+        ctx.beginPath();
+        ctx.arc(cpos.x, cpos.y, size / 2, 0, Math.PI * 2);
+        ctx.stroke();
+      } else if (shape === "cross") {
+        const half = size / 2;
+        ctx.beginPath();
+        ctx.moveTo(cpos.x - half, cpos.y); ctx.lineTo(cpos.x + half, cpos.y);
+        ctx.moveTo(cpos.x, cpos.y - half); ctx.lineTo(cpos.x, cpos.y + half);
+        ctx.stroke();
+      } else if (shape === "dot") {
+        ctx.beginPath();
+        ctx.arc(cpos.x, cpos.y, Math.max(2, size / 6), 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+    }
     rafRef.current = null;
   };
   const requestFrame = () => { if(rafRef.current!==null)return; rafRef.current=requestAnimationFrame(compositeNow); };
@@ -786,6 +855,10 @@ export default function Canvas({
       const world=toWorld(pos.x,pos.y);
       if(wsRef.current?.readyState===WebSocket.OPEN) wsRef.current.send(JSON.stringify({type:"cursor",x:world.x,y:world.y}));
       currentStrokeRef.current.points.push(world);
+      // FEATURE (crosshair táctil): actualizar la posición en coordenadas
+      // de pantalla (no de mundo) para que compositeNow lo dibuje en el
+      // lugar correcto sin importar zoom/pan/flip actuales.
+      crosshairPosRef.current = pos;
       streamStroke();requestFrame();
     };
 
@@ -834,11 +907,20 @@ export default function Canvas({
           if(elapsed<GESTURE_MS && maxMove<GESTURE_PX){
             if(maxFingers===2){ window.dispatchEvent(new CustomEvent("drawbot:undo")); return; }
             if(maxFingers===3){ window.dispatchEvent(new CustomEvent("drawbot:redo")); return; }
+            // FEATURE: gesto de 4 dedos voltea el lienzo horizontalmente
+            // (vista local). Se dispara como evento — igual que undo/redo
+            // — para que App.tsx pueda mantener sincronizado el estado
+            // visual del botón de Toolbar con el flip real.
+            if(maxFingers===4){ window.dispatchEvent(new CustomEvent("drawbot:flipx")); return; }
           }
         }
       }
 
-      if(currentStrokeRef.current&&touchPtrsRef.current.size===0)finishStroke();
+      if(currentStrokeRef.current&&touchPtrsRef.current.size===0){
+        finishStroke();
+        crosshairPosRef.current = null;
+        requestFrame();
+      }
     };
 
     const onPointerCancel=(e:PointerEvent)=>{
@@ -847,6 +929,7 @@ export default function Canvas({
         clearPendingDrawTimer();
         currentStrokeRef.current=null;
         gestureRef.current=null;
+        crosshairPosRef.current=null;
       }
     };
 
@@ -982,6 +1065,20 @@ export default function Canvas({
   (Canvas as any)._sendRedo = () => {
     sendReliable(() => wsRef.current, { type: "redo" });
   };
+  // FEATURE: voltear lienzo — solo vista local, sin WS ni persistencia.
+  (Canvas as any)._toggleFlipX = () => {
+    flipXRef.current = !flipXRef.current;
+    requestFrame();
+    return flipXRef.current;
+  };
+  (Canvas as any)._isFlippedX = () => flipXRef.current;
+  // FEATURE: configuración del crosshair desde el panel de Ajustes —
+  // forma (círculo/cruz/punto), tamaño en pixeles, y si está habilitado.
+  (Canvas as any)._setCrosshairConfig = (cfg: { shape?: "circle"|"cross"|"dot"; size?: number; enabled?: boolean }) => {
+    crosshairRef.current = { ...crosshairRef.current, ...cfg };
+    requestFrame();
+  };
+  (Canvas as any)._getCrosshairConfig = () => crosshairRef.current;
 
   return (
     <canvas

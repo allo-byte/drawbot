@@ -324,6 +324,48 @@ function App() {
   const createRoom   = useCallback(() => { window.location.href = `/?room=${Math.random().toString(36).substring(2, 8)}`; }, []);
   const copyRoomLink = useCallback(async () => { await navigator.clipboard.writeText(window.location.href); alert("✅ Enlace copiado"); }, []);
 
+  // FEATURE: voltear lienzo (vista local, no afecta a otros usuarios).
+  // El estado real vive en Canvas (flipXRef); aquí solo reflejamos un
+  // booleano para que el botón de Toolbar pueda mostrarse "activo".
+  const [flippedX, setFlippedX] = useState(false);
+  const handleFlipHorizontal = useCallback(() => {
+    const nowFlipped = (Canvas as any)._toggleFlipX?.();
+    setFlippedX(!!nowFlipped);
+  }, []);
+
+  // El gesto de 4 dedos (detectado dentro de Canvas) dispara este evento
+  // para que App.tsx mantenga sincronizado el estado visual del botón.
+  useEffect(() => {
+    const onFlipGesture = () => handleFlipHorizontal();
+    window.addEventListener("drawbot:flipx", onFlipGesture);
+    return () => window.removeEventListener("drawbot:flipx", onFlipGesture);
+  }, [handleFlipHorizontal]);
+
+  // FEATURE: crosshair configurable (forma + tamaño) — persiste en
+  // localStorage para que la preferencia del usuario sobreviva entre
+  // sesiones, igual que los atajos de teclado.
+  const [crosshairConfig, setCrosshairConfigRaw] = useState<{ shape: "circle"|"cross"|"dot"; size: number; enabled: boolean }>(() => {
+    try {
+      const saved = localStorage.getItem("drawbot-crosshair");
+      if (saved) return JSON.parse(saved);
+    } catch {}
+    return { shape: "circle", size: 24, enabled: true };
+  });
+  const setCrosshairConfig = useCallback((cfg: Partial<{ shape: "circle"|"cross"|"dot"; size: number; enabled: boolean }>) => {
+    setCrosshairConfigRaw(prev => {
+      const next = { ...prev, ...cfg };
+      localStorage.setItem("drawbot-crosshair", JSON.stringify(next));
+      (Canvas as any)._setCrosshairConfig?.(next);
+      return next;
+    });
+  }, []);
+  // Aplicar la configuración guardada en Canvas tan pronto como esté
+  // montado — Canvas inicializa su propio ref con un default que puede no
+  // coincidir con lo que el usuario guardó en una sesión anterior.
+  useEffect(() => {
+    (Canvas as any)._setCrosshairConfig?.(crosshairConfig);
+  }, []);
+
   return (
     <>
       <Toolbar
@@ -345,6 +387,8 @@ function App() {
         profile={profile} onShowProfile={() => setShowProfile(true)}
         connStatus={connStatus}
         room={room} createRoom={createRoom} copyRoomLink={copyRoomLink}
+        flippedX={flippedX} onFlipHorizontal={handleFlipHorizontal}
+        crosshairConfig={crosshairConfig} setCrosshairConfig={setCrosshairConfig}
       />
       {showProfile && (
         <ProfilePanel

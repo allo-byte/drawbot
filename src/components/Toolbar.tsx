@@ -37,6 +37,12 @@ type Props = {
   setBgColor: Setter<string>;
   panMode: boolean;
   setPanMode: Setter<boolean>;
+  // FEATURE: voltear lienzo (vista local)
+  flippedX: boolean;
+  onFlipHorizontal: () => void;
+  // FEATURE: crosshair configurable desde Ajustes
+  crosshairConfig: { shape: "circle"|"cross"|"dot"; size: number; enabled: boolean };
+  setCrosshairConfig: (cfg: Partial<{ shape: "circle"|"cross"|"dot"; size: number; enabled: boolean }>) => void;
   canvasSize: CanvasSize;
   setCanvasSize: Setter<CanvasSize>;
   colorHistory: string[];
@@ -125,6 +131,19 @@ const BRUSH_ICONS: Record<BrushType | "eraser", React.ReactNode> = {
       <rect x="5" y="12" width="18" height="10" rx="2" fill="#e8e0d8" opacity="0.9"/>
       <rect x="5" y="12" width="8" height="10" rx="2" fill="#e8854a" opacity="0.85"/>
       <line x1="5" y1="22" x2="23" y2="22" stroke="#bbb" strokeWidth="1.5"/>
+    </svg>
+  ),
+};
+
+// FEATURE: iconos para las herramientas nuevas del panel de pinceles
+const TOOL_ICONS = {
+  flip: (
+    <svg viewBox="0 0 28 28" width="20" height="20">
+      <line x1="14" y1="3" x2="14" y2="25" stroke="currentColor" strokeWidth="1.2" strokeDasharray="2,2" opacity="0.5"/>
+      <path d="M14 6 L6 10 L6 18 L14 22 Z" fill="currentColor" opacity="0.75"/>
+      <path d="M14 6 L22 10 L22 18 L14 22 Z" fill="currentColor" opacity="0.35"/>
+      <path d="M3 14 L7 11 L7 17 Z" fill="currentColor" opacity="0.6"/>
+      <path d="M25 14 L21 11 L21 17 Z" fill="currentColor" opacity="0.6"/>
     </svg>
   ),
 };
@@ -218,7 +237,10 @@ export default function Toolbar({
   color, setColor, brushSize, setBrushSize,
   opacity, setOpacity, eraser, setEraser,
   brushType, setBrushType, bgColor, setBgColor,
-  panMode, setPanMode, canvasSize, setCanvasSize,
+  panMode, setPanMode,
+  flippedX, onFlipHorizontal,
+  crosshairConfig, setCrosshairConfig,
+  canvasSize, setCanvasSize,
   colorHistory, shortcuts, setShortcuts,
   onUndo, onRedo, canUndo, canRedo,
   savePNG, users, username,
@@ -254,6 +276,8 @@ export default function Toolbar({
   };
 
   const activeBrush = BRUSHES.find(b => b.type === brushType);
+  const activeToolIcon  = eraser ? BRUSH_ICONS.eraser : BRUSH_ICONS[brushType];
+  const activeToolLabel = eraser ? "Borrador" : (activeBrush?.label ?? "Pincel");
 
   const handleCaptureKey = (e: React.KeyboardEvent) => {
     if (!capturingKey) return;
@@ -395,6 +419,9 @@ export default function Toolbar({
           font-size: 12px; color: #888; max-width: 80px;
           white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
         }
+        .tb-tool-sep {
+          height: 0.5px; background: #2a2a2a; margin: 6px 0;
+        }
 
         @media (max-width: 480px) {
           .tb-panel-brushes { left: 52px; transform: none; width: calc(100vw - 64px); }
@@ -422,13 +449,13 @@ export default function Toolbar({
         <div className="tb-color-btn" style={{ background: color }}
           onClick={() => { closeAll(); setShowColor(c=>!c); }} />
 
-        {/* Pincel */}
+        {/* Herramienta activa (pincel / borrador / cubeta / licuar) */}
         <div className={`tb-btn${showBrushes ? " active" : ""}`}
-          onClick={() => { closeAll(); setShowBrushes(b=>!b); }} title="Pinceles">
-          {eraser ? BRUSH_ICONS.eraser : BRUSH_ICONS[brushType]}
+          onClick={() => { closeAll(); setShowBrushes(b=>!b); }} title="Pinceles y herramientas">
+          {activeToolIcon}
         </div>
         <span style={{ color:"#666", fontSize:12, flexShrink:0 }}>
-          {eraser ? "Borrador" : (activeBrush?.label ?? "Pincel")}
+          {activeToolLabel}
         </span>
 
         <div className="tb-sep"/>
@@ -445,12 +472,20 @@ export default function Toolbar({
 
         {/* Pan / Borrador */}
         <div className={`tb-btn${panMode ? " active" : ""}`}
-          onClick={() => { setPanMode(!panMode); if (!panMode) setEraser(false); }}
+          onClick={() => setPanMode(!panMode)}
           title={`Mover (${fmtShortcut(shortcuts.pan)})`} style={{ fontSize:16 }}>✋</div>
-        <div className={`tb-btn${eraser && !panMode ? " eraser-active" : ""}`}
-          onClick={() => { setEraser(!eraser); setPanMode(false); }}
+        <div className={`tb-btn${eraser ? " eraser-active" : ""}`}
+          onClick={() => setEraser(!eraser)}
           title={`Borrador (${fmtShortcut(shortcuts.eraser)})`}>
           {BRUSH_ICONS.eraser}
+        </div>
+
+        {/* FEATURE: voltear lienzo — toggle directo en la barra, ya que es
+            una acción de vista instantánea, no requiere abrir un panel */}
+        <div className={`tb-btn${flippedX ? " active" : ""}`}
+          onClick={onFlipHorizontal}
+          title="Voltear lienzo (solo tu vista)" style={{ fontSize:15 }}>
+          {TOOL_ICONS.flip}
         </div>
 
         <div style={{ flex:1 }}/>
@@ -509,7 +544,7 @@ export default function Toolbar({
           onChange={v => setOpacity(v/100)} color="#e09a3a" label="OPA"/>
       </div>
 
-      {/* ═══ PANEL PINCELES ═══ */}
+      {/* ═══ PANEL PINCELES + HERRAMIENTAS ═══ */}
       {showBrushes && (
         <>
           <div className="tb-overlay" onClick={() => setShowBrushes(false)}/>
@@ -622,7 +657,6 @@ export default function Toolbar({
           <div className="tb-panel" style={{ zIndex:1100, top:60, right:12, width:280 }}>
             <div className="tb-section" style={{ marginBottom:10 }}>Tamaño del lienzo</div>
             {[
-              // ── Sin "Libre (infinito)" — lienzo acotado siempre ──
               { label:"iPad mini",       w:1024, h:768  },
               { label:"HD",              w:1920, h:1080 },
               { label:"4K",              w:3840, h:2160 },
@@ -695,6 +729,66 @@ export default function Toolbar({
                 }}>
                 Restaurar predeterminados
               </button>
+            </div>
+
+            {/* FEATURE: crosshair táctil — forma y tamaño configurables.
+                Solo importa de verdad en dispositivos táctiles (donde no
+                existe el cursor CSS "crosshair" nativo del mouse), pero
+                se deja disponible siempre por si el usuario quiere
+                probarlo o usarlo también con mouse. */}
+            <div style={{ marginTop:16, paddingTop:14, borderTop:"0.5px solid #1e1e1e" }}>
+              <div className="tb-section" style={{ marginBottom:10 }}>Crosshair táctil</div>
+
+              <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:10 }}>
+                <span style={{ color:"#ccc", fontSize:13 }}>Mostrar al dibujar</span>
+                <div
+                  onClick={() => setCrosshairConfig({ enabled: !crosshairConfig.enabled })}
+                  style={{
+                    width:38, height:20, borderRadius:10, cursor:"pointer",
+                    background: crosshairConfig.enabled ? "#7070dd" : "#2a2a2a",
+                    position:"relative", transition:"background .15s", flexShrink:0,
+                  }}>
+                  <div style={{
+                    position:"absolute", top:2, left: crosshairConfig.enabled ? 20 : 2,
+                    width:16, height:16, borderRadius:"50%", background:"#fff",
+                    transition:"left .15s",
+                  }}/>
+                </div>
+              </div>
+
+              <div style={{ fontSize:10, color:"#555", textTransform:"uppercase", letterSpacing:".06em", marginBottom:6 }}>
+                Forma
+              </div>
+              <div style={{ display:"flex", gap:6, marginBottom:14 }}>
+                {([
+                  { id: "circle" as const, label: "Círculo" },
+                  { id: "cross"  as const, label: "Cruz"    },
+                  { id: "dot"    as const, label: "Punto"   },
+                ]).map(opt => (
+                  <button key={opt.id}
+                    onClick={() => setCrosshairConfig({ shape: opt.id })}
+                    style={{
+                      flex:1, padding:"6px 4px", borderRadius:8, cursor:"pointer",
+                      background: crosshairConfig.shape===opt.id ? "#1e1e3a" : "#1a1a1a",
+                      border:`0.5px solid ${crosshairConfig.shape===opt.id ? "#7070dd" : "#2a2a2a"}`,
+                      color: crosshairConfig.shape===opt.id ? "#aaaaff" : "#888",
+                      fontSize:11,
+                    }}>
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+
+              <div style={{
+                fontSize:10, color:"#555", textTransform:"uppercase", letterSpacing:".06em",
+                marginBottom:6, display:"flex", justifyContent:"space-between",
+              }}>
+                <span>Tamaño</span>
+                <span style={{ color:"#888" }}>{crosshairConfig.size}px</span>
+              </div>
+              <input type="range" min={10} max={80} value={crosshairConfig.size}
+                onChange={e => setCrosshairConfig({ size: Number(e.target.value) })}
+                style={{ width:"100%", accentColor:"#7070dd" }} />
             </div>
           </div>
         </>
