@@ -356,6 +356,18 @@ export default function Toolbar({
           box-shadow: 0 8px 32px rgba(0,0,0,0.7);
           padding: 14px; max-height: 85vh; overflow-y: auto;
         }
+        /* FEATURE: scrollbar visible para el panel de Ajustes — el
+           contenido (atajos de teclado + sección de crosshair táctil)
+           puede exceder fácilmente los 85vh de alto disponible, y la
+           scrollbar nativa del navegador suele ser casi invisible sobre
+           fondos oscuros, dando la impresión de que no hay scroll. */
+        .tb-panel-settings::-webkit-scrollbar { width: 8px; }
+        .tb-panel-settings::-webkit-scrollbar-track { background: #161616; border-radius: 8px; }
+        .tb-panel-settings::-webkit-scrollbar-thumb {
+          background: #3a3a4a; border-radius: 8px; border: 2px solid #161616;
+        }
+        .tb-panel-settings::-webkit-scrollbar-thumb:hover { background: #4a4a5a; }
+        .tb-panel-settings { scrollbar-width: thin; scrollbar-color: #3a3a4a #161616; }
         .tb-panel-brushes { top: 60px; left: 50%; transform: translateX(-50%); width: min(92vw,380px); }
         .tb-panel-color   { top: 60px; left: 60px; width: 300px; }
         .tb-panel-room    { top: 60px; right: 12px; width: 260px; }
@@ -709,7 +721,7 @@ export default function Toolbar({
       {showSettings && (
         <>
           <div className="tb-overlay" onClick={() => { setShowSettings(false); setCapturingKey(null); }}/>
-          <div className="tb-panel" style={{ zIndex:1100, top:60, right:12, width:300 }}
+          <div className="tb-panel tb-panel-settings" style={{ zIndex:1100, top:60, right:12, width:300 }}
             onKeyDown={handleCaptureKey} tabIndex={0}>
             <div className="tb-section" style={{ marginBottom:10 }}>Ajustes — Atajos de teclado</div>
             <div style={{ color:"#555", fontSize:11, marginBottom:12 }}>
