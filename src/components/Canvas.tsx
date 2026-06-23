@@ -461,33 +461,33 @@ export default function Canvas({
     if (cpos && crosshairRef.current.enabled && currentStrokeRef.current) {
       const { shape, size } = crosshairRef.current;
       ctx.save();
-      // FIX (crosshair desplazado en iPad/táctil): el ctx.restore() de
-      // arriba solo deshace el ctx.save() del inicio de compositeNow, que
-      // tenía ctx.scale(dpr,dpr) aplicado — el contexto sigue escalado por
-      // el devicePixelRatio en este punto. cpos está en píxeles CSS
-      // (de getBoundingClientRect, sin dpr), así que dibujarlo aquí sin
-      // resetear la transformación lo multiplica por dpr y lo desplaza
-      // — más notorio en iPad, donde dpr suele ser 2 o 3.
-      // setTransform(1,0,0,1,0,0) limpia CUALQUIER transformación previa
-      // (scale, translate) y deja el contexto en coordenadas de pantalla
-      // puras 1:1, que es exactamente lo que cpos espera.
+      // FIX (crosshair desplazado en iPad/táctil): setTransform(1,0,0,1,0,0)
+      // deja el contexto en píxeles FÍSICOS reales del canvas (su
+      // resolución interna, canvas.width/height), no en píxeles CSS. Pero
+      // cpos viene de getBoundingClientRect() — está en píxeles CSS. Como
+      // canvas.width = cssWidth * dpr, hay que multiplicar cpos por dpr
+      // para que la posición coincida con el sistema de coordenadas físico
+      // que queda activo tras el reset. Sin esto, en un iPad con dpr=2 la
+      // cruz aparece a la mitad de distancia real (offset hacia arriba-
+      // izquierda), exactamente el síntoma reportado.
+      const dx = cpos.x * dpr, dy = cpos.y * dpr;
+      const r  = size / 2 * dpr;
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.strokeStyle = "rgba(255,255,255,0.85)";
       ctx.fillStyle = "rgba(255,255,255,0.85)";
-      ctx.lineWidth = 1.5;
+      ctx.lineWidth = 1.5 * dpr;
       if (shape === "circle") {
         ctx.beginPath();
-        ctx.arc(cpos.x, cpos.y, size / 2, 0, Math.PI * 2);
+        ctx.arc(dx, dy, r, 0, Math.PI * 2);
         ctx.stroke();
       } else if (shape === "cross") {
-        const half = size / 2;
         ctx.beginPath();
-        ctx.moveTo(cpos.x - half, cpos.y); ctx.lineTo(cpos.x + half, cpos.y);
-        ctx.moveTo(cpos.x, cpos.y - half); ctx.lineTo(cpos.x, cpos.y + half);
+        ctx.moveTo(dx - r, dy); ctx.lineTo(dx + r, dy);
+        ctx.moveTo(dx, dy - r); ctx.lineTo(dx, dy + r);
         ctx.stroke();
       } else if (shape === "dot") {
         ctx.beginPath();
-        ctx.arc(cpos.x, cpos.y, Math.max(2, size / 6), 0, Math.PI * 2);
+        ctx.arc(dx, dy, Math.max(2, r / 3), 0, Math.PI * 2);
         ctx.fill();
       }
       ctx.restore();
@@ -827,6 +827,13 @@ export default function Canvas({
         const world=toWorld(pos.x,pos.y);
         if(wsRef.current?.readyState===WebSocket.OPEN) wsRef.current.send(JSON.stringify({type:"cursor",x:world.x,y:world.y}));
         currentStrokeRef.current.points.push(world);
+        // FEATURE (crosshair táctil): Apple Pencil reporta pointerType
+        // "pen", no "touch" — este branch es distinto al de dedos puros
+        // de más abajo, y antes nunca actualizaba crosshairPosRef, por lo
+        // que la cruz se quedaba "congelada" o no aparecía al dibujar con
+        // el lápiz. Solo lo activamos para "pen", no para "mouse" — con
+        // mouse ya existe el cursor CSS "crosshair" nativo del navegador.
+        if (e.pointerType === "pen") crosshairPosRef.current = pos;
         streamStroke();requestFrame();return;
       }
 
