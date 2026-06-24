@@ -193,6 +193,16 @@ export default function Canvas({
   const crosshairPosRef = useRef<{x:number;y:number} | null>(null);
   const touchPtrsRef   = useRef<Map<number,{x:number;y:number}>>(new Map());
 
+  // FEATURE: estabilización de trazo (stroke smoothing). 0 = sin suavizado
+  // (comportamiento idéntico al actual: el punto pintado es el punto real
+  // del puntero). >0 = el punto que se pinta "persigue" al puntero real con
+  // un rezago elástico — cada frame se acerca una fracción de la distancia
+  // restante. Valor en rango 0–100 (porcentaje), igual estilo que OPA/TAM.
+  // smoothedPosRef guarda la posición YA suavizada del trazo en curso (en
+  // coordenadas de mundo); se reinicia en cada startStroke().
+  const smoothingRef    = useRef(0);
+  const smoothedPosRef  = useRef<Point | null>(null);
+
   // ── FIX gestos: estado de gesto más robusto ─────────────────────────────
   // pendingSingleTouch: guarda el primer toque sin iniciar trazo inmediatamente.
   // Solo se confirma como "trazo de dibujo" tras un pequeño delay (FREEZE_MS)
@@ -240,6 +250,38 @@ export default function Canvas({
     const canvas = canvasRef.current;
     const effSx = (flipXRef.current && canvas) ? canvas.clientWidth - sx : sx;
     return { x:(effSx-v.x)/v.scale, y:(sy-v.y)/v.scale };
+  };
+
+  // FEATURE: estabilización de trazo — aplica un rezago elástico sobre el
+  // punto real en coordenadas de mundo (rawWorld). smoothingRef.current es
+  // 0–100; lo mapeamos a una fracción de "alcance" por frame (factor de
+  // interpolación hacia el punto real). 0 = sin suavizado (devuelve el
+  // punto real tal cual, idéntico al comportamiento previo). Valores altos
+  // = el punto pintado se queda más "atrás" respecto al puntero real,
+  // dando un trazo más suave pero con más distancia visual entre la punta
+  // y la tinta — mismo comportamiento que el "stroke stabilizer" de
+  // Procreate/otros editores.
+  const applySmoothing = (rawWorld: Point): Point => {
+    const amount = smoothingRef.current;
+    if (amount <= 0) {
+      smoothedPosRef.current = rawWorld;
+      return rawWorld;
+    }
+    const prev = smoothedPosRef.current;
+    if (!prev) {
+      smoothedPosRef.current = rawWorld;
+      return rawWorld;
+    }
+    // factor pequeño = sigue más de cerca (poco suavizado);
+    // factor grande = se queda más atrás (mucho suavizado).
+    // amount 1–100 → factor ~0.45 (casi nada de rezago) hasta ~0.04 (mucho rezago)
+    const factor = 0.45 - (amount / 100) * 0.41;
+    const next = {
+      x: prev.x + (rawWorld.x - prev.x) * factor,
+      y: prev.y + (rawWorld.y - prev.y) * factor,
+    };
+    smoothedPosRef.current = next;
+    return next;
   };
 
   const offW = () => canvasSizeRef.current?.w ?? DEFAULT_W;
@@ -718,6 +760,11 @@ export default function Canvas({
       const world=toWorld(pos.x,pos.y);
       const cs=canvasSizeRef.current;
       if(cs&&(world.x<0||world.y<0||world.x>cs.w||world.y>cs.h))return;
+      // FEATURE (estabilización): reiniciar el punto suavizado al inicio
+      // de cada trazo nuevo, para que arranque exactamente donde el
+      // usuario tocó/hizo clic (sin rezago inicial heredado de un trazo
+      // anterior).
+      smoothedPosRef.current = world;
       currentStrokeRef.current={
         _sid: genSid(),
         points:[world],color:colorRef.current,size:sizeRef.current,
@@ -824,8 +871,14 @@ export default function Canvas({
           requestFrame();return;
         }
         if(!currentStrokeRef.current)return;
-        const world=toWorld(pos.x,pos.y);
-        if(wsRef.current?.readyState===WebSocket.OPEN) wsRef.current.send(JSON.stringify({type:"cursor",x:world.x,y:world.y}));
+        const rawWorld=toWorld(pos.x,pos.y);
+        // FEATURE (estabilización): el punto que se agrega al trazo (y se
+        // pinta/sincroniza) es el punto YA suavizado, no el crudo. El
+        // cursor de red (cursor remoto que ven los demás) usa el punto
+        // crudo, así su posición de "puntero" sigue siendo exacta — solo
+        // la TINTA se suaviza, no la posición reportada del cursor.
+        if(wsRef.current?.readyState===WebSocket.OPEN) wsRef.current.send(JSON.stringify({type:"cursor",x:rawWorld.x,y:rawWorld.y}));
+        const world=applySmoothing(rawWorld);
         currentStrokeRef.current.points.push(world);
         // FEATURE (crosshair táctil): Apple Pencil reporta pointerType
         // "pen", no "touch" — este branch es distinto al de dedos puros
@@ -870,8 +923,9 @@ export default function Canvas({
       }
 
       if(!currentStrokeRef.current)return;
-      const world=toWorld(pos.x,pos.y);
-      if(wsRef.current?.readyState===WebSocket.OPEN) wsRef.current.send(JSON.stringify({type:"cursor",x:world.x,y:world.y}));
+      const rawWorld=toWorld(pos.x,pos.y);
+      if(wsRef.current?.readyState===WebSocket.OPEN) wsRef.current.send(JSON.stringify({type:"cursor",x:rawWorld.x,y:rawWorld.y}));
+      const world=applySmoothing(rawWorld);
       currentStrokeRef.current.points.push(world);
       // FEATURE (crosshair táctil): actualizar la posición en coordenadas
       // de pantalla (no de mundo) para que compositeNow lo dibuje en el
@@ -884,6 +938,9 @@ export default function Canvas({
       if(!currentStrokeRef.current)return;
       const stroke=currentStrokeRef.current;
       currentStrokeRef.current=null;
+      // FEATURE (estabilización): liberar el punto suavizado para que el
+      // siguiente trazo arranque limpio en startStroke().
+      smoothedPosRef.current = null;
       const markedStroke = {...stroke, _uid: myUserIdRef.current};
       strokesRef.current.push(markedStroke);
       drawStroke(getLayerCtx(stroke.layerId??-1),stroke);
@@ -948,6 +1005,7 @@ export default function Canvas({
         currentStrokeRef.current=null;
         gestureRef.current=null;
         crosshairPosRef.current=null;
+        smoothedPosRef.current=null;
       }
     };
 
@@ -1097,6 +1155,14 @@ export default function Canvas({
     requestFrame();
   };
   (Canvas as any)._getCrosshairConfig = () => crosshairRef.current;
+  // FEATURE: estabilización de trazo — setter/getter expuestos con el
+  // mismo patrón que el crosshair, para que App.tsx pueda aplicar el valor
+  // guardado en localStorage tan pronto como Canvas esté montado, y para
+  // que Toolbar pueda leer el valor actual si lo necesita.
+  (Canvas as any)._setSmoothing = (value: number) => {
+    smoothingRef.current = Math.max(0, Math.min(100, value));
+  };
+  (Canvas as any)._getSmoothing = () => smoothingRef.current;
 
   return (
     <canvas

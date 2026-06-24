@@ -45,6 +45,9 @@ type Props = {
   // FEATURE: crosshair configurable desde Ajustes
   crosshairConfig: { shape: "circle"|"cross"|"dot"; size: number; enabled: boolean };
   setCrosshairConfig: (cfg: Partial<{ shape: "circle"|"cross"|"dot"; size: number; enabled: boolean }>) => void;
+  // FEATURE: estabilización de trazo — slider 0-100, vive en el panel de pinceles
+  smoothing: number;
+  setSmoothing: (value: number) => void;
   canvasSize: CanvasSize;
   setCanvasSize: Setter<CanvasSize>;
   colorHistory: string[];
@@ -242,6 +245,7 @@ export default function Toolbar({
   panMode, setPanMode,
   flippedX, onFlipHorizontal,
   crosshairConfig, setCrosshairConfig,
+  smoothing, setSmoothing,
   canvasSize, setCanvasSize,
   colorHistory, shortcuts, setShortcuts,
   onUndo, onRedo, canUndo, canRedo,
@@ -368,6 +372,16 @@ export default function Toolbar({
         }
         .tb-panel-settings::-webkit-scrollbar-thumb:hover { background: #4a4a5a; }
         .tb-panel-settings { scrollbar-width: thin; scrollbar-color: #3a3a4a #161616; }
+        /* FEATURE: el panel de pinceles ahora también puede crecer
+           (slider de estabilización debajo de la grilla), así que aplicamos
+           la misma scrollbar visible que ya usa el panel de Ajustes. */
+        .tb-panel-brushes::-webkit-scrollbar { width: 8px; }
+        .tb-panel-brushes::-webkit-scrollbar-track { background: #161616; border-radius: 8px; }
+        .tb-panel-brushes::-webkit-scrollbar-thumb {
+          background: #3a3a4a; border-radius: 8px; border: 2px solid #161616;
+        }
+        .tb-panel-brushes::-webkit-scrollbar-thumb:hover { background: #4a4a5a; }
+        .tb-panel-brushes { scrollbar-width: thin; scrollbar-color: #3a3a4a #161616; }
         .tb-panel-brushes { top: 60px; left: 50%; transform: translateX(-50%); width: min(92vw,380px); }
         .tb-panel-color   { top: 60px; left: 60px; width: 300px; }
         .tb-panel-room    { top: 60px; right: 12px; width: 260px; }
@@ -578,6 +592,30 @@ export default function Toolbar({
                 onClick={() => { setEraser(true); setShowBrushes(false); }}>
                 {BRUSH_ICONS.eraser}
                 <span className="lbl">Borrar</span>
+              </div>
+            </div>
+
+            {/* FEATURE: estabilización de trazo (stroke smoothing). Vive
+                aquí, en el panel de pinceles, porque afecta directamente
+                "cómo se comporta el trazo" — junto a la elección de pincel,
+                no junto a TAM/OPA en la barra izquierda (decisión del
+                usuario) ni escondido en Ajustes. 0 = sin suavizado
+                (comportamiento idéntico al que ya existía). */}
+            <div style={{ marginTop:14, paddingTop:14, borderTop:"0.5px solid #2e2e2e" }}>
+              <div style={{
+                display:"flex", justifyContent:"space-between", alignItems:"baseline",
+                marginBottom:6,
+              }}>
+                <span style={{ fontSize:10, color:"#555", textTransform:"uppercase", letterSpacing:".06em" }}>
+                  Estabilización
+                </span>
+                <span style={{ fontSize:11, color:"#888" }}>{smoothing}%</span>
+              </div>
+              <input type="range" min={0} max={100} value={smoothing}
+                onChange={e => setSmoothing(Number(e.target.value))}
+                style={{ width:"100%", accentColor:"#7070dd" }} />
+              <div style={{ fontSize:10, color:"#444", marginTop:4 }}>
+                Suaviza el trazo dejando que la tinta "persiga" al puntero. 0 = desactivado.
               </div>
             </div>
           </div>

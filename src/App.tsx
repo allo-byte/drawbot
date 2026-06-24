@@ -376,6 +376,30 @@ function App() {
     (Canvas as any)._setCrosshairConfig?.(crosshairConfig);
   }, []);
 
+  // FEATURE: estabilización de trazo (stroke smoothing) — slider 0-100 en
+  // el panel de pinceles. Mismo patrón exacto que crosshairConfig: estado
+  // en App.tsx + persistencia en localStorage + aplicación directa sobre
+  // el ref de Canvas vía _setSmoothing, en vez de pasarlo como prop normal
+  // (así no hay que re-renderizar Canvas por cada cambio del slider).
+  const [smoothing, setSmoothingRaw] = useState<number>(() => {
+    try {
+      const saved = localStorage.getItem("drawbot-smoothing");
+      if (saved !== null) return Number(saved) || 0;
+    } catch {}
+    return 0;
+  });
+  const setSmoothing = useCallback((value: number) => {
+    setSmoothingRaw(value);
+    try { localStorage.setItem("drawbot-smoothing", String(value)); } catch {}
+    (Canvas as any)._setSmoothing?.(value);
+  }, []);
+  // Aplicar el valor guardado en Canvas tan pronto como esté montado —
+  // igual razón que el crosshair: el ref interno de Canvas arranca con su
+  // propio default (0) que puede no coincidir con lo guardado.
+  useEffect(() => {
+    (Canvas as any)._setSmoothing?.(smoothing);
+  }, []);
+
   return (
     <>
       <Toolbar
@@ -399,6 +423,7 @@ function App() {
         room={room} createRoom={createRoom} copyRoomLink={copyRoomLink}
         flippedX={flippedX} onFlipHorizontal={handleFlipHorizontal}
         crosshairConfig={crosshairConfig} setCrosshairConfig={setCrosshairConfig}
+        smoothing={smoothing} setSmoothing={setSmoothing}
       />
       {showProfile && (
         <ProfilePanel
