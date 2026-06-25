@@ -32,6 +32,12 @@ type Props = {
   onDelete:      (id: number) => void;
   onToggleVisibility: (id: number) => void;
   onToggleLock:  (id: number) => void;
+  // FEATURE: capa Referencia — toggle por capa, y la subida de imagen
+  // queda asociada a una capa concreta (no a "la capa activa" de forma
+  // implícita desde la UI, aunque internamente eso es lo que termina
+  // pasando — ver handleUploadImageToLayer en App.tsx).
+  onToggleReference: (id: number) => void;
+  onUploadImage: (layerId: number, file: File) => void;
   onRename:      (id: number, name: string) => void;
   onReorder:     (fromIdx: number, toIdx: number) => void;
   onOpacity:     (id: number, opacity: number) => void;
@@ -188,7 +194,7 @@ function OpacitySlider({ layerId, initialOpacity, onLive, onCommit }: {
 export default function LayerPanel({
   layers, activeLayerId, myUserId, layerLimit,
   onSelect, onAdd, onDelete,
-  onToggleVisibility, onToggleLock,
+  onToggleVisibility, onToggleLock, onToggleReference, onUploadImage,
   onRename, onReorder, onOpacity, onOpacityLive, onMerge, onBlendMode,
 }: Props) {
   const [editingId,   setEditingId  ] = useState<number|null>(null);
@@ -196,6 +202,13 @@ export default function LayerPanel({
   const [dragIdx,     setDragIdx    ] = useState<number|null>(null);
   const [dragOverIdx, setDragOverIdx] = useState<number|null>(null);
   const [localHidden, setLocalHidden] = useState<Set<number>>(new Set());
+  // FEATURE: un solo <input type="file"> oculto y reutilizado para todas
+  // las capas, en vez de uno por fila — evitamos montar N inputs ocultos
+  // cuando casi nunca se usan más de uno a la vez. Guardamos en un ref
+  // CUÁL capa pidió la subida justo antes de abrir el selector de archivo,
+  // para saber a quién entregarle el resultado en onChange.
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const uploadTargetRef = useRef<number | null>(null);
 
   const myLayers    = layers.filter(l => l.ownerId === myUserId);
   const otherLayers = layers.filter(l => l.ownerId !== myUserId);
@@ -219,6 +232,19 @@ export default function LayerPanel({
     const t = nameDraft.trim();
     if (t) onRename(id, t);
     setEditingId(null);
+  };
+
+  // FEATURE: abre el selector de archivo nativo para una capa concreta.
+  const triggerUpload = (layerId: number) => {
+    uploadTargetRef.current = layerId;
+    fileInputRef.current?.click();
+  };
+  const handleFileChosen = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    const layerId = uploadTargetRef.current;
+    e.target.value = ""; // permite elegir el mismo archivo otra vez después
+    uploadTargetRef.current = null;
+    if (file && layerId != null) onUploadImage(layerId, file);
   };
 
   return (
@@ -265,6 +291,12 @@ export default function LayerPanel({
         .lp-item.active { background:#181830; border-left-color:#7070dd; }
         .lp-item.drag-over { background:#1e1e38; }
         .lp-item.readonly { cursor:default; padding-left:20px; }
+        /* FEATURE: una capa Referencia se distingue visualmente con un
+           borde punteado violeta tenue — sutil, no un banner gigante, pero
+           reconocible de inmediato en la lista para no confundirla con una
+           capa normal mientras se decide qué insertar dónde. */
+        .lp-item.is-ref { border-left-color:#5d4a9a; }
+        .lp-item.is-ref.active { border-left-color:#9a7fe0; background:#1e1830; }
         .lp-handle { font-size:10px; color:#2a2a2a; cursor:grab; padding:0 2px; flex-shrink:0; }
         .lp-handle:hover { color:#444; }
         .lp-handle:active { cursor:grabbing; }
@@ -304,6 +336,11 @@ export default function LayerPanel({
         .lp-ibtn:hover { color:#aaa; background:#222; }
         .lp-ibtn.on { color:#7070dd; }
         .lp-ibtn.del:hover { color:#ff5555 !important; background:#1e1010 !important; }
+        /* FEATURE: botón de toggle Referencia con su propio color "on"
+           (violeta más frío que el azul-violeta de selección normal), para
+           que de un vistazo se note la diferencia entre "esta capa está
+           activa" y "esta capa es de referencia". */
+        .lp-ibtn.ref-on { color:#9a7fe0; }
         .lp-merge-btn {
           width:18px; height:18px; border-radius:4px;
           background:transparent; border:none; color:#3a3a3a;
@@ -315,7 +352,51 @@ export default function LayerPanel({
         .lp-merge-btn:disabled { opacity:0.2; cursor:not-allowed; }
         .lp-owner { display:flex; align-items:center; gap:6px; padding:7px 12px 3px 12px; }
         .lp-owner-name { font-size:10px; color:#404040; }
+        /* FEATURE: fila de acciones extra (insertar imagen + badge de
+           Referencia) que aparece debajo del nombre solo en la capa
+           activa, junto al selector de blend mode / slider de opacidad —
+           mismo criterio que ya usabas para esos dos: no abarrotar la fila
+           compacta de siempre, mostrar detalle solo donde el usuario ya
+           está mirando. */
+        .lp-ref-row {
+          display:flex; align-items:center; justify-content:space-between;
+          padding:4px 0 8px;
+        }
+        .lp-ref-label { display:flex; align-items:center; gap:6px; }
+        .lp-ref-text { font-size:10.5px; color:#999; }
+        .lp-ref-badge {
+          font-size:8.5px; color:#9a7fe0; background:#211a38;
+          border:0.5px solid #3a2f5e; border-radius:4px;
+          padding:1px 5px; letter-spacing:.03em;
+        }
+        .lp-toggle {
+          width:32px; height:18px; border-radius:9px; cursor:pointer;
+          position:relative; flex-shrink:0; transition:background .15s;
+        }
+        .lp-toggle .knob {
+          position:absolute; top:2px; width:14px; height:14px;
+          border-radius:50%; background:#fff; transition:left .15s;
+        }
+        .lp-insert-img-btn {
+          display:flex; align-items:center; gap:5px;
+          width:100%; margin-top:6px;
+          background:#1a1a1a; border:0.5px dashed #333;
+          border-radius:6px; color:#888; font-size:10.5px;
+          padding:6px 8px; cursor:pointer; transition:all .12s;
+          justify-content:center;
+        }
+        .lp-insert-img-btn:hover { background:#1e1e30; border-color:#5d4a9a; color:#bbaaee; }
       `}</style>
+
+      {/* Input de archivo oculto, compartido por todas las filas — ver
+          triggerUpload/handleFileChosen arriba. */}
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="image/*"
+        style={{ display:"none" }}
+        onChange={handleFileChosen}
+      />
 
       <div className="lp-wrap">
         <div className="lp-header">
@@ -342,10 +423,11 @@ export default function LayerPanel({
           {[...myLayers].reverse().map((layer, rIdx) => {
             const origIdx = myLayers.length - 1 - rIdx;
             const isActive = layer.id === activeLayerId;
+            const isRef = !!layer.isReference;
             return (
               <div key={layer.id}>
                 <div
-                  className={`lp-item${isActive?" active":""}${dragOverIdx===origIdx?" drag-over":""}`}
+                  className={`lp-item${isActive?" active":""}${dragOverIdx===origIdx?" drag-over":""}${isRef?" is-ref":""}`}
                   onClick={() => onSelect(layer.id)}
                   draggable
                   onDragStart={() => setDragIdx(origIdx)}
@@ -421,6 +503,33 @@ export default function LayerPanel({
                       onLive={onOpacityLive}
                       onCommit={onOpacity}
                     />
+
+                    {/* FEATURE: toggle Referencia + botón de insertar
+                        imagen, en su propia fila debajo del slider de
+                        opacidad. Solo visibles para la capa activa, igual
+                        criterio que blend mode / opacidad de arriba. */}
+                    <div className="lp-ref-row">
+                      <div className="lp-ref-label">
+                        <span className="lp-ref-text">Referencia</span>
+                        {isRef && <span className="lp-ref-badge">activa</span>}
+                      </div>
+                      <div className="lp-toggle"
+                        title={isRef
+                          ? "Capa de referencia activa — su contenido no se comparte con la sala"
+                          : "Marcar como capa de referencia"}
+                        onClick={() => onToggleReference(layer.id)}
+                        style={{ background: isRef ? "#5d4a9a" : "#2a2a2a" }}
+                      >
+                        <div className="knob" style={{ left: isRef ? 16 : 2 }}/>
+                      </div>
+                    </div>
+
+                    <button className="lp-insert-img-btn"
+                      onClick={() => triggerUpload(layer.id)}
+                      title="Insertar imagen en esta capa"
+                    >
+                      🖼 Insertar imagen
+                    </button>
                   </div>
                 )}
               </div>

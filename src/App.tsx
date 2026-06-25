@@ -38,6 +38,11 @@ function App() {
   const [bgColor,       setBgColor   ] = useState("#111111");
   const [canvasSize,    setCanvasSizeRaw] = useState<CanvasSize>({ w: 1024, h: 768 });
   const [savePNG,       setSavePNG   ] = useState<() => void>(() => () => {});
+  // FEATURE: insertar imagen en capa — Canvas expone uploadFn vía onReady,
+  // igual que ya hacía con savePNG. Se guarda en un ref (no estado) porque
+  // no necesita disparar re-render alguno: LayerPanel la invoca
+  // directamente desde un handler de evento, no la usa para renderizar.
+  const uploadImageRef = useRef<(file: File) => void>(() => {});
   const [users,         setUsers     ] = useState<string[]>([]);
   const [profile,       setProfileRaw] = useState<Profile>(getStoredProfile);
   const [showProfile,   setShowProfile] = useState(false);
@@ -245,6 +250,36 @@ function App() {
     (Canvas as any)._sendWS?.({ type: "layer_update", layers: updated.filter(l => l.ownerId === uid) });
   }, [layers]);
 
+  // FEATURE: capa Referencia — toggle por capa. Igual mecanismo que
+  // visibilidad/lock (actualiza estado local + manda layer_update por WS),
+  // pero el SERVIDOR es quien decide qué hacer con ese layer_update: si
+  // isReference queda en true, el backend deja de reenviarlo a los demás
+  // desde ese momento (ver handler "layer_update" en index.ts). No hace
+  // falta ninguna lógica especial aquí en el cliente — el mismo mensaje
+  // que ya mandábamos para cualquier otro cambio de capa basta.
+  const handleToggleReference = useCallback((id: number) => {
+    const uid = myUserIdRef.current;
+    const updated = layers.map(l => l.id === id && l.ownerId === uid ? { ...l, isReference: !l.isReference } : l);
+    setLayers(updated);
+    (Canvas as any)._sendWS?.({ type: "layer_update", layers: updated.filter(l => l.ownerId === uid) });
+  }, [layers]);
+
+  // FEATURE: insertar imagen en una capa concreta desde LayerPanel. Canvas
+  // internamente usa SIEMPRE la capa activa (activeLayerRef.current) para
+  // decidir dónde insertar — así que, si el usuario pulsa "insertar imagen"
+  // en una capa que no es la activa, primero la seleccionamos y luego
+  // disparamos la subida. setActiveLayerId es síncrono en cuanto a la
+  // intención, pero React no garantiza que active_LayerRef dentro de
+  // Canvas ya esté actualizado en el mismo tick — por eso seleccionamos
+  // PRIMERO y, en la práctica, el usuario ya eligió el archivo en el paso
+  // anterior (input file), dando tiempo de sobra a que el prop activeLayerId
+  // se propague antes de que termine de leerse el archivo (FileReader es
+  // asíncrono).
+  const handleUploadImageToLayer = useCallback((layerId: number, file: File) => {
+    setActiveLayerId(layerId);
+    uploadImageRef.current(file);
+  }, []);
+
   const handleRenameLayer = useCallback((id: number, name: string) => {
     const uid = myUserIdRef.current;
     const updated = layers.map(l => l.id === id && l.ownerId === uid ? { ...l, name } : l);
@@ -440,7 +475,7 @@ function App() {
         canvasSize={canvasSize}
         layers={layers} activeLayerId={safeActiveId}
         setUsers={setUsers}
-        onReady={(fn) => setSavePNG(() => fn)}
+        onReady={(fn, uploadFn) => { setSavePNG(() => fn); uploadImageRef.current = uploadFn; }}
         onBgColor={(c) => setBgColor(c)}
         onCanvasSizeFromServer={handleCanvasSizeFromServer}
         onUndoStateChange={handleUndoStateChange}
@@ -457,6 +492,8 @@ function App() {
           onDelete={handleDeleteLayer}
           onToggleVisibility={handleToggleVisibility}
           onToggleLock={handleToggleLock}
+          onToggleReference={handleToggleReference}
+          onUploadImage={handleUploadImageToLayer}
           onRename={handleRenameLayer}
           onReorder={handleReorder}
           onOpacity={handleLayerOpacity}

@@ -6,12 +6,26 @@ export type BrushType =
   | "pen" | "caligraphy1" | "caligraphy2"
   | "airbrush" | "oil" | "crayon" | "marker" | "pencil";
 
+// FEATURE: patrón "fillImage" — toda herramienta que produce un resultado
+// rasterizado completo en vez de un trazo punto a punto (insertar imagen,
+// y en el futuro cubeta/transformar si se reintroducen) se representa como
+// un Stroke especial con points:[] y este campo poblado. Esto reutiliza
+// gratis toda la persistencia (Supabase), sync por WebSocket, y undo/redo
+// ya existentes para strokes normales, sin sistemas paralelos.
+type FillImage = {
+  data: string;   // dataURL de la imagen ya comprimida
+  srcW: number; srcH: number; // tamaño original de la imagen (referencia)
+  dstW: number; dstH: number; // tamaño final dibujado en el lienzo
+  offsetX?: number; offsetY?: number; // esquina superior izquierda en coords de mundo
+};
+
 type Stroke = {
   _sid?: string; // ID único local — clave del fix de undo/redo
   points: Point[];
   color: string; size: number; opacity: number;
   eraser: boolean; brushType?: BrushType; layerId?: number;
   _uid?: string;
+  fillImage?: FillImage;
 };
 
 export type BlendMode =
@@ -23,6 +37,12 @@ export type BlendMode =
 export type Layer = {
   id: number; name: string; visible: boolean; opacity: number;
   locked: boolean; ownerId: string; ownerName: string; blendMode?: BlendMode;
+  // FEATURE: capa Referencia — su contenido (strokes, imágenes insertadas)
+  // jamás se manda al servidor mientras esté activa, ni siquiera la
+  // existencia de la capa se revela a otros usuarios de la sala. Pensada
+  // para bocetos guía, fotos de pose, paletas de color, etc. que el propio
+  // usuario quiere ver/usar mientras dibuja sin compartirlas.
+  isReference?: boolean;
 };
 
 const BLEND_CSS: Record<string, GlobalCompositeOperation> = {
@@ -140,6 +160,22 @@ function getCachedImage(img: CanvasImage): HTMLImageElement | null {
   const el = new Image();
   el.onload = () => imgCache.set(img.id, el);
   el.src = img.data;
+  return null;
+}
+
+// FEATURE (fillImage): caché paralelo para las imágenes insertadas como
+// strokes especiales (patrón fillImage), keyed por _sid del stroke en vez
+// de un id numérico de imagen global — porque cada fillImage VIVE dentro
+// de un stroke normal, no en la lista separada roomImages/imagesRef.
+// onLoaded es opcional: se usa para pedir un repintado en cuanto la imagen
+// termine de decodificarse (la primera vez que se ve, antes de eso no hay
+// nada que dibujar).
+const fillImgCache = new Map<string, HTMLImageElement>();
+function getCachedFillImage(sid: string, dataUrl: string, onLoaded?: () => void): HTMLImageElement | null {
+  if (fillImgCache.has(sid)) return fillImgCache.get(sid)!;
+  const el = new Image();
+  el.onload = () => { fillImgCache.set(sid, el); onLoaded?.(); };
+  el.src = dataUrl;
   return null;
 }
 
@@ -305,6 +341,22 @@ export default function Canvas({
   };
 
   const drawStrokeFrom = (ctx: CanvasRenderingContext2D, stroke: Stroke, fromIndex: number) => {
+    // FEATURE (fillImage): un stroke de imagen insertada no tiene puntos
+    // (points:[]) — se dibuja entero de una sola vez, sin importar
+    // fromIndex (no hay "trazo incremental" que reanudar, es un único
+    // rectángulo). Se maneja ANTES del guard de pts.length<1 de abajo,
+    // que de otro modo descartaría el stroke por no tener puntos.
+    if (stroke.fillImage && stroke._sid) {
+      const fi = stroke.fillImage;
+      const el = getCachedFillImage(stroke._sid, fi.data, () => requestFrame());
+      if (el) {
+        ctx.save();
+        ctx.globalAlpha = stroke.opacity;
+        ctx.drawImage(el, fi.offsetX ?? 0, fi.offsetY ?? 0, fi.dstW, fi.dstH);
+        ctx.restore();
+      }
+      return;
+    }
     const pts = stroke.points; if (pts.length < 1) return;
     const bt = stroke.brushType ?? "pen", col = stroke.color, sz = stroke.size;
     const { r,g,b } = hexRgb(col); const erasing = stroke.eraser;
@@ -944,14 +996,30 @@ export default function Canvas({
       const markedStroke = {...stroke, _uid: myUserIdRef.current};
       strokesRef.current.push(markedStroke);
       drawStroke(getLayerCtx(stroke.layerId??-1),stroke);
-      if(wsRef.current?.readyState===WebSocket.OPEN) wsRef.current.send(JSON.stringify({type:"stroke",stroke}));
+
+      // FEATURE (capa Referencia): un trazo a mano dentro de una capa
+      // marcada Referencia sigue el mismo principio que las imágenes
+      // insertadas en ella — se pinta localmente (ya ocurrió arriba) pero
+      // NUNCA se manda por WS. Sin esto, dibujar encima de una imagen de
+      // referencia con el pincel normal sí se compartiría, contradiciendo
+      // el propósito completo de la capa.
+      const layer = layersRef.current.find(l => l.id === stroke.layerId);
+      const isRef = !!layer?.isReference;
+
+      if (!isRef && wsRef.current?.readyState===WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({type:"stroke",stroke}));
+      }
       if(!stroke.eraser)onStrokeFinishedRef.current?.(stroke.color);
       // REDISEÑO undo/redo: ya no calculamos snapshots locales aquí. El
       // servidor es la única fuente de verdad — dibujar un trazo nuevo
       // simplemente invalida su redo stack server-side automáticamente
       // (ver handler "stroke" en index.ts). El cliente solo necesita saber
       // que ahora SÍ puede deshacer algo, lo cual se refleja al tener al
-      // menos un stroke propio en strokesRef.current.
+      // menos un stroke propio en strokesRef.current. Para trazos en una
+      // capa Referencia no hay servidor que confirme nada, pero igual
+      // reflejamos canUndo=true porque sí existe en strokesRef.current
+      // local — Canvas no distingue origen al recorrer ese array para
+      // undo/redo (ver más abajo, esto es solo el estado visual del botón).
       onUndoStateChangeRef.current?.({ canUndo: true, canRedo: false });
       requestFrame();
     };
@@ -1045,23 +1113,71 @@ export default function Canvas({
       link.href=ec.toDataURL("image/png");link.click();
     };
 
+    // FEATURE: uploadImage reescrita — antes insertaba la imagen como un
+    // CanvasImage global de la sala (flotando sobre todas las capas, sin
+    // pertenecer a ninguna). Ahora se inserta DENTRO de la capa activa,
+    // usando el patrón fillImage: se crea un Stroke especial (points:[],
+    // fillImage:{...}) que se pinta en el offscreen de esa capa y se
+    // intenta sincronizar exactamente como cualquier otro stroke — con una
+    // excepción: si la capa activa es Referencia, el stroke se queda
+    // 100% local (nunca se manda por WS), igual que cualquier trazo
+    // dibujado a mano dentro de una capa Referencia.
     const uploadImage=(file:File)=>{
       const reader=new FileReader();
       reader.onload=(ev)=>{
         const original=ev.target?.result as string;
         const img=new Image();
         img.onload=()=>{
+          const lid = activeLayerRef.current;
+          const layer = layersRef.current.find(l=>l.id===lid);
+          if(!layer || layer.locked) return;
+
           const maxSide=2048;
-          let w=img.width,h=img.height;
+          let srcW=img.width, srcH=img.height;
+          let w=srcW, h=srcH;
           if(w>maxSide||h>maxSide){const r=Math.min(maxSide/w,maxSide/h);w=Math.round(w*r);h=Math.round(h*r);}
           const tmp=document.createElement("canvas");tmp.width=w;tmp.height=h;
           tmp.getContext("2d")!.drawImage(img,0,0,w,h);
           const compressed=tmp.toDataURL("image/jpeg",0.85);
+
+          // Tamaño de destino en el lienzo: igual lógica que antes (ancho
+          // máximo de 800 unidades de mundo, alto proporcional), centrado
+          // en el centro de la vista actual.
           const v=viewRef.current;
           const cx=(canvas.clientWidth/2-v.x)/v.scale;
           const cy=(canvas.clientHeight/2-v.y)/v.scale;
-          const iw=Math.min(w,800),ih=Math.round(h*(iw/w));
-          wsRef.current?.send(JSON.stringify({type:"image_add",data:compressed,x:cx-iw/2,y:cy-ih/2,w:iw,h:ih}));
+          const dstW=Math.min(w,800), dstH=Math.round(h*(dstW/w));
+          const offsetX=cx-dstW/2, offsetY=cy-dstH/2;
+
+          const stroke: Stroke = {
+            _sid: genSid(),
+            points: [],
+            color: "#000000", size: 0, opacity: 1, eraser: false,
+            layerId: lid,
+            fillImage: { data: compressed, srcW, srcH, dstW, dstH, offsetX, offsetY },
+          };
+
+          // Pintar localmente de inmediato — idéntico tanto si la capa es
+          // Referencia como si no. La diferencia está en lo que pasa
+          // DESPUÉS de pintarlo: si se comparte o se queda solo aquí.
+          const markedStroke = { ...stroke, _uid: myUserIdRef.current };
+          strokesRef.current.push(markedStroke);
+          drawStroke(getLayerCtx(lid), stroke);
+          requestFrame();
+
+          if (layer.isReference) {
+            // FEATURE (capa Referencia): nunca sale del navegador. No hay
+            // mensaje WS, no hay entrada en el undo autoritativo del
+            // servidor — exactamente como pide el contexto del proyecto
+            // ("ni siquiera la existencia de la capa" sale de aquí, y
+            // por extensión, nada de su contenido tampoco).
+            return;
+          }
+
+          if(wsRef.current?.readyState===WebSocket.OPEN) {
+            wsRef.current.send(JSON.stringify({type:"stroke", stroke}));
+          }
+          onUndoStateChangeRef.current?.({ canUndo: true, canRedo: false });
         };
         img.src=original;
       };
@@ -1135,6 +1251,15 @@ export default function Canvas({
   // REDISEÑO undo/redo autoritativo: el cliente solo pide la acción, sin
   // calcular ni mandar ningún dato. sendReliable garantiza que el mensaje
   // llegue incluso si el WS está momentáneamente reconectando.
+  // NOTA (capa Referencia): undo/redo es autoritativo en SERVIDOR, y los
+  // strokes de una capa Referencia nunca llegaron al servidor (ver handler
+  // "stroke" en index.ts). Esto significa, por diseño, que deshacer/rehacer
+  // NUNCA afecta a lo que dibujaste/insertaste dentro de una capa
+  // Referencia — el botón de undo seguirá afectando tu último trazo
+  // SINCRONIZADO (de una capa normal), saltándose por completo cualquier
+  // trazo de referencia más reciente. Coincide con lo documentado: la capa
+  // Referencia no tiene su propio historial de undo/redo, para evitar
+  // reintroducir un segundo sistema de historial en paralelo al del server.
   (Canvas as any)._sendUndo = () => {
     sendReliable(() => wsRef.current, { type: "undo" });
   };
